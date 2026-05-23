@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ComfyUI Listener Control Center</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+    
+    <!-- Left Navigation Sidebar -->
+    <aside class="sidebar">
+      <nav class="nav-menu">
+        <div class="nav-item active" data-tab="tab-generator">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+          Generation
+        </div>
+        <div class="nav-item" data-tab="tab-parameters">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="4" y1="21" x2="4" y2="14"></line>
+            <line x1="4" y1="10" x2="4" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="12"></line>
+            <line x1="12" y1="8" x2="12" y2="3"></line>
+            <line x1="20" y1="21" x2="20" y2="16"></line>
+            <line x1="20" y1="12" x2="20" y2="3"></line>
+            <line x1="1" y1="14" x2="7" y2="14"></line>
+            <line x1="9" y1="8" x2="15" y2="8"></line>
+            <line x1="17" y1="16" x2="23" y2="16"></line>
+          </svg>
+          Parameters
+          <span class="nav-badge" id="sidebar-params-badge" style="display: none;">0</span>
+        </div>
+        <div class="nav-item" data-tab="tab-service">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M15 7h3a5 5 0 0 1 5 5 5 5 0 0 1-5 5h-3m-6 0H6a5 5 0 0 1-5-5 5 5 0 0 1 5-5h3"></path>
+            <line x1="8" y1="12" x2="16" y2="12"></line>
+          </svg>
+          Service Connection
+        </div>
+        <div class="nav-item" data-tab="tab-open-output-folder">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+          Open Output Folder
+        </div>
+      </nav>
+      
+      <!-- Image Comparison Configuration -->
+      <div class="connection-card comparison-settings-card">
+        <div class="card-header">
+          <h3>Image Comparison</h3>
+        </div>
+        <div class="card-body">
+          <div class="input-group" style="margin-bottom: 0;">
+            <label for="compare-source-select">Compare Reference Source</label>
+            <select id="compare-source-select">
+              <option value="slot1">Slot 1 Input Image</option>
+              <option value="slot2">Slot 2 Input Image</option>
+              <option value="slot3">Slot 3 Input Image</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Auto Save Output Settings -->
+      <div class="connection-card output-settings-card">
+        <div class="card-header">
+          <h3>Output Setting</h3>
+        </div>
+        <div class="card-body">
+          <div class="output-path-container">
+            <span class="path-label">Output Folder:</span>
+            <div class="output-path-display" id="output-path-display" title="Not configured - images will only remain in ComfyUI temp/history">Not configured</div>
+          </div>
+          <div class="btn-row">
+            <button id="btn-select-output-folder" class="btn btn-secondary btn-small">
+              <span>Browse...</span>
+            </button>
+            <button id="btn-clear-output-folder" class="btn btn-ghost btn-small" disabled>
+              <span>Clear</span>
+            </button>
+          </div>
+
+          <div class="autosave-settings-group">
+            <div class="input-group">
+              <label for="autosave-prefix">Prefix</label>
+              <input type="text" id="autosave-prefix" placeholder="autosave">
+            </div>
+
+            <div class="input-group">
+              <label for="autosave-delimiter">Delimiter</label>
+              <input type="text" id="autosave-delimiter" placeholder="_" value="_">
+            </div>
+
+            <div class="checkbox-row">
+              <input type="checkbox" id="autosave-insert-original" class="autosave-checkbox" checked>
+              <label for="autosave-insert-original">Insert Original Filename</label>
+            </div>
+
+            <div class="input-group" id="autosave-source-container" style="margin-bottom: 12px;">
+              <label for="autosave-original-source">Source Filename</label>
+              <select id="autosave-original-source">
+                <option value="slot1">Slot 1 Reference Image</option>
+                <option value="slot2">Slot 2 Reference Image</option>
+                <option value="slot3">Slot 3 Reference Image</option>
+              </select>
+            </div>
+
+            <div class="inline-inputs-row">
+              <div class="input-group-inline">
+                <label for="autosave-padding">Padding:</label>
+                <input type="number" id="autosave-padding" min="0" max="10" value="4">
+              </div>
+              <div class="input-group-inline">
+                <label for="autosave-starting-no">Starting No:</label>
+                <input type="number" id="autosave-starting-no" min="0" value="1">
+              </div>
+            </div>
+
+            <div class="autosave-preview-box">
+              <span class="preview-title">Filename Preview</span>
+              <div class="preview-content" id="autosave-preview-filename">autosave_example_original_0001.png</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar-footer">
+        <p>Portable Environment</p>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      
+      <!-- Tab: Image Generator -->
+      <section id="tab-generator" class="tab-pane active">
+        <div class="dashboard-grid">
+          
+          <!-- Column 1: Config & Parameters -->
+          <div class="grid-col flex-col gap-2">
+            
+
+
+            <!-- Card: Qwen Prompts -->
+            <div class="panel qwen-prompts-panel hidden" id="qwen-prompts-panel">
+              <div class="panel-header">
+                <div class="panel-title-icon qwen-icon" style="background-color: var(--accent);"></div>
+                <h3>Prompt Editor</h3>
+                <span class="badge" id="qwen-params-count">0 prompts</span>
+              </div>
+              <div class="panel-body scrollable">
+                <div id="qwen-prompts-container" class="params-container">
+                  <!-- Dynamically inserted Qwen prompt parameters go here -->
+                </div>
+              </div>
+            </div>
+
+            <!-- Card: Input Images -->
+            <div class="panel input-images-panel hidden" id="input-images-panel">
+              <div class="panel-header">
+                <div class="panel-title-icon image-icon" style="background-color: var(--accent);"></div>
+                <h3>Input Images</h3>
+                <span class="badge" id="input-images-count">0 active</span>
+              </div>
+              <div class="panel-body scrollable">
+                <div id="input-images-container" class="params-container">
+                  <!-- Dynamically inserted input image slots go here -->
+                </div>
+              </div>
+            </div>
+
+
+
+            <!-- Action Area -->
+            <div class="action-bar">
+              <button id="btn-generate" class="btn btn-primary btn-large btn-disabled" disabled>
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                <span>Generate Image</span>
+              </button>
+            </div>
+            
+          </div>
+
+          <!-- Column 2: Status & Output Image -->
+          <div class="grid-col flex-col gap-2">
+            
+            <!-- Card: Live Progress -->
+            <div class="panel monitor-panel">
+              <div class="panel-header">
+                <div class="panel-title-icon monitor-icon"></div>
+                <h3>Execution Monitor</h3>
+              </div>
+              <div class="panel-body">
+                <div class="progress-details">
+                  <div class="detail-row">
+                    <span class="detail-label">Queue Status:</span>
+                    <span class="detail-value" id="queue-status">Waiting...</span>
+                  </div>
+                  <div class="detail-row">
+                    <span class="detail-label">Active Node:</span>
+                    <span class="detail-value" id="current-node">Idle</span>
+                  </div>
+                  <div class="detail-row">
+                    <span class="detail-label">Progress:</span>
+                    <span class="detail-value" id="progress-text">0% (0/0)</span>
+                  </div>
+                </div>
+                
+                <div class="progress-track">
+                  <div class="progress-bar" id="progress-fill" style="width: 0%"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Card: Visual Display -->
+            <div class="panel display-panel">
+              <div class="panel-header">
+                <div class="panel-title-icon image-icon"></div>
+                <h3>Output Preview</h3>
+                <div class="header-actions">
+                  <button id="btn-compare" class="btn btn-mini" disabled>Compare</button>
+                  <button id="btn-open-image" class="btn btn-mini">Open in Viewer</button>
+                </div>
+              </div>
+              <div class="panel-body flex-center relative">
+                <div id="display-empty" class="image-empty-state">
+                  <svg class="gallery-placeholder-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                  <p>Generated images will be displayed here in real time</p>
+                </div>
+                
+                <div id="display-loading" class="image-loading-state hidden">
+                  <div class="spinner"></div>
+                  <p>ComfyUI is executing nodes...</p>
+                </div>
+
+                <div id="display-image-container" class="image-container hidden">
+                  <img id="result-img" src="" alt="ComfyUI Output Image">
+                  
+                  <div id="compare-slider-container" class="compare-container hidden">
+                    <img id="compare-img-bottom" class="compare-img" src="" alt="Output Image">
+                    <div id="compare-img-top-wrapper" class="compare-top-wrapper">
+                      <img id="compare-img-top" class="compare-img" src="" alt="Input Image">
+                    </div>
+                    <div id="compare-handle" class="compare-handle">
+                      <div class="handle-line"></div>
+                      <div class="handle-button">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" style="display: block;">
+                          <path d="M8 7l-5 5 5 5M16 7l5 5-5 5" />
+                        </svg>
+                      </div>
+                      <div class="handle-line"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+          
+        </div>
+      </section>
+
+      <!-- Tab: Parameters -->
+      <section id="tab-parameters" class="tab-pane">
+        <div class="top-header">
+          <h2>Parameter Configuration</h2>
+          <p>Configure dynamic generation parameters extracted from the workflow</p>
+        </div>
+        <!-- Card: Workflow Import -->
+        <div class="panel workflow-panel">
+          <div class="panel-header">
+            <div class="panel-title-icon workflow-icon"></div>
+            <h3>Workflow JSON</h3>
+          </div>
+          <div class="panel-body">
+
+            <!-- Row 1: Web UI format (for PNG metadata embedding) -->
+            <div class="wf-row-label">Web UI Format</div>
+            <div class="workflow-file-row">
+              <input type="text" id="webui-workflow-filename" class="workflow-filename-input"
+                     readonly placeholder="No workflow loaded…">
+              <button id="btn-load-webui-workflow" class="btn btn-secondary btn-small"
+                      title="Load Web UI format JSON (.json saved normally from ComfyUI)">
+                <span>Load</span>
+              </button>
+            </div>
+
+            <!-- Row 2: API format (used to send prompts to ComfyUI) -->
+            <div class="wf-row-label" style="margin-top:10px;">API Format</div>
+            <div class="workflow-file-row">
+              <input type="text" id="workflow-filename" class="workflow-filename-input"
+                     readonly placeholder="No workflow loaded…">
+              <button id="btn-load-workflow" class="btn btn-ghost btn-small"
+                      title="Load API format JSON (Save (API Format) from ComfyUI)">
+                <span>Load</span>
+              </button>
+            </div>
+
+            <!-- Hidden – kept for JS reset logic -->
+            <button id="btn-reload-workflow" style="display:none;"></button>
+
+          </div>
+        </div>
+
+        <div class="panel params-panel standalone-params-panel">
+          <div class="panel-header">
+            <div class="panel-title-icon params-icon"></div>
+            <h3>Workflow Parameters</h3>
+            <span class="badge" id="params-count">0 parameters detected</span>
+          </div>
+          <div class="panel-body scrollable">
+            <div id="no-params-msg" class="empty-state">
+              <p>Please load a workflow first to extract configuration parameters</p>
+            </div>
+            
+            <div id="dynamic-params-container" class="params-container hidden">
+              <!-- Dynamically inserted prompt parameters go here -->
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab: Service Connection -->
+      <section id="tab-service" class="tab-pane">
+        <div class="top-header">
+          <h2>Service Connection</h2>
+          <p>Configure and manage the connection to your ComfyUI instance</p>
+        </div>
+        <div class="panel service-panel standalone-service-panel">
+          <div class="panel-header">
+            <div class="panel-title-icon" style="background-color: var(--accent);"></div>
+            <h3>ComfyUI Service</h3>
+          </div>
+          <div class="panel-body">
+            <div class="input-group">
+              <label for="comfyui-url">API Address</label>
+              <input type="text" id="comfyui-url" value="http://127.0.0.1:8188" placeholder="http://127.0.0.1:8188">
+            </div>
+            <div class="input-group">
+              <label for="comfyui-output-dir">ComfyUI Output Dir</label>
+              <div class="workflow-file-row">
+                <input type="text" id="comfyui-output-dir" class="workflow-filename-input"
+                       readonly placeholder="e.g. C:\ComfyUI\output">
+                <button id="btn-select-comfyui-output-dir" class="btn btn-secondary btn-small"
+                        title="Select ComfyUI output folder">
+                  <span>Browse…</span>
+                </button>
+              </div>
+            </div>
+            <div class="input-group">
+              <label for="preview-method-select">Live Preview</label>
+              <select id="preview-method-select">
+                <option value="auto">Auto</option>
+                <option value="taesd">TAESD (High Quality)</option>
+                <option value="latent2rgb">Latent2RGB (Fast)</option>
+                <option value="none">None</option>
+              </select>
+            </div>
+            <button id="btn-connect" class="btn btn-secondary" style="margin-top: 10px;">
+              <span>Connect Service</span>
+            </button>
+            
+            <div class="status-indicator">
+              <span class="status-dot disconnected" id="status-dot"></span>
+              <span class="status-label" id="status-text">Disconnected</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+  </div>
+  <script src="renderer.js"></script>
+</body>
+</html>

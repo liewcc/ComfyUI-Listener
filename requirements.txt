@@ -1,0 +1,5 @@
+# Python dependencies for ComfyUI Listener
+# Add other packages as needed, one per line.
+# Example:
+# requests>=2.31.0
+# websocket-client>=1.6.0

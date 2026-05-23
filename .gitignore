@@ -1,0 +1,48 @@
+# Python virtual environment & portable folders
+.venv/
+venv/
+git/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE configurations
+.vscode/
+.idea/
+
+# Local logs
+*.log
+# Temporary pip installer
+get-pip.py
+
+# Node/Electron portable environments and packages
+.node_venv/
+node_modules/
+
+# Credentials & Sensitive Configs
+.env
+.env.*
+
+# Generated media & datasets
+*.png
+*.jpg
+*.jpeg
+*.webp
+output/
+temp/
+browser_user_data/
+browser_session_sandbox/
+
+# Kill app scripts
+kill_app.bat
+kill_app.ps1
+
+# Test & Scratch scripts
+test/
+tests/
+test_*
+test.*
+*.test.*
+scratch/

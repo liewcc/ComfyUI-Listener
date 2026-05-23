@@ -1,0 +1,15 @@
+{
+  "name": "comfyui-listener-ui",
+  "version": "1.0.0",
+  "description": "Electron desktop GUI for ComfyUI API Control",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "electron": "^30.0.1"
+  }
+}
