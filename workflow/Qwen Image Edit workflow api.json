@@ -52,6 +52,14 @@
       "image1": [
         "128:117",
         0
+      ],
+      "image2": [
+        "128:118",
+        0
+      ],
+      "image3": [
+        "128:122",
+        0
       ]
     },
     "class_type": "TextEncodeQwenImageEditPlus",
@@ -118,6 +126,14 @@
       ],
       "image1": [
         "128:117",
+        0
+      ],
+      "image2": [
+        "128:118",
+        0
+      ],
+      "image3": [
+        "128:122",
         0
       ]
     },
@@ -257,6 +273,28 @@
       "title": "ImageRotate 1"
     }
   },
+  "128:124": {
+    "inputs": {
+      "image": ""
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image 2"
+    }
+  },
+  "128:119": {
+    "inputs": {
+      "rotation": "none",
+      "image": [
+        "128:125",
+        0
+      ]
+    },
+    "class_type": "ImageRotate",
+    "_meta": {
+      "title": "ImageRotate 3"
+    }
+  },
   "128:117": {
     "inputs": {
       "upscale_method": "bicubic",
@@ -272,6 +310,60 @@
       "title": "Scale Image 1 to Total Pixels"
     }
   },
+  "128:118": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "megapixels": 1.6,
+      "resolution_steps": 1,
+      "image": [
+        "128:127",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "Scale Image 2 to Total Pixels"
+    }
+  },
+  "128:122": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "megapixels": 1.6,
+      "resolution_steps": 1,
+      "image": [
+        "128:119",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "Scale Image 3 to Total Pixels"
+    }
+  },
+  "128:123": {
+    "inputs": {
+      "images": [
+        "128:122",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image 3"
+    }
+  },
+  "128:121": {
+    "inputs": {
+      "images": [
+        "128:118",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image 2"
+    }
+  },
   "128:120": {
     "inputs": {
       "images": [
@@ -282,6 +374,32 @@
     "class_type": "PreviewImage",
     "_meta": {
       "title": "Preview Image 1"
+    }
+  },
+  "128:129": {
+    "inputs": {
+      "flip_method": "y-axis: horizontally",
+      "image": [
+        "128:124",
+        0
+      ]
+    },
+    "class_type": "ImageFlip",
+    "_meta": {
+      "title": "ImageFlip"
+    }
+  },
+  "128:130": {
+    "inputs": {
+      "flip_method": "x-axis: vertically",
+      "image": [
+        "128:125",
+        0
+      ]
+    },
+    "class_type": "ImageFlip",
+    "_meta": {
+      "title": "ImageFlip"
     }
   },
   "128:131": {
@@ -295,6 +413,28 @@
     "class_type": "ImageFlip",
     "_meta": {
       "title": "ImageFlip"
+    }
+  },
+  "128:127": {
+    "inputs": {
+      "rotation": "none",
+      "image": [
+        "128:124",
+        0
+      ]
+    },
+    "class_type": "ImageRotate",
+    "_meta": {
+      "title": "ImageRotate 2"
+    }
+  },
+  "128:125": {
+    "inputs": {
+      "image": ""
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image 3"
     }
   }
 }

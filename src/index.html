@@ -34,6 +34,13 @@
           Parameters
           <span class="nav-badge" id="sidebar-params-badge" style="display: none;">0</span>
         </div>
+        <div class="nav-item" data-tab="tab-facefusion">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+            <circle cx="12" cy="7" r="4"></circle>
+          </svg>
+          Face Fusion
+        </div>
         <div class="nav-item" data-tab="tab-service">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M15 7h3a5 5 0 0 1 5 5 5 5 0 0 1-5 5h-3m-6 0H6a5 5 0 0 1-5-5 5 5 0 0 1 5-5h3"></path>
@@ -47,19 +54,36 @@
         </div>
       </nav>
       
-      <!-- Image Comparison Configuration -->
-      <div class="connection-card comparison-settings-card">
+
+
+      <!-- Automation Settings -->
+      <div class="connection-card automation-card">
         <div class="card-header">
-          <h3>Image Comparison</h3>
+          <h3>Automation</h3>
         </div>
         <div class="card-body">
-          <div class="input-group" style="margin-bottom: 0;">
-            <label for="compare-source-select">Compare Reference Source</label>
-            <select id="compare-source-select">
-              <option value="slot1">Slot 1 Input Image</option>
-              <option value="slot2">Slot 2 Input Image</option>
-              <option value="slot3">Slot 3 Input Image</option>
-            </select>
+          <div class="checkbox-row" style="margin-bottom: 12px;">
+            <input type="checkbox" id="auto-send-ff" class="autosave-checkbox">
+            <label for="auto-send-ff">Send output to Face Fusion</label>
+          </div>
+          <div class="checkbox-row" style="margin-bottom: 12px;">
+            <input type="checkbox" id="auto-watch-folder" class="autosave-checkbox">
+            <label for="auto-watch-folder">Watch Folder for auto-run</label>
+          </div>
+          
+          <div id="watch-folder-settings-group" style="display: none; margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px;">
+            <div class="output-path-container">
+              <span class="path-label">Watch Folder:</span>
+              <div class="output-path-display" id="watch-path-display" title="Not configured">Not configured</div>
+            </div>
+            <div class="btn-row" style="margin-top: 10px;">
+              <button id="btn-select-watch-folder" class="btn btn-secondary btn-small">
+                <span>Browse...</span>
+              </button>
+              <button id="btn-clear-watch-folder" class="btn btn-ghost btn-small" disabled>
+                <span>Clear</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -99,6 +123,11 @@
               <label for="autosave-insert-original">Insert Original Filename</label>
             </div>
 
+            <div class="checkbox-row">
+              <input type="checkbox" id="autosave-clear-history" class="autosave-checkbox">
+              <label for="autosave-clear-history">Clear Job History on Save</label>
+            </div>
+
             <div class="input-group" id="autosave-source-container" style="margin-bottom: 12px;">
               <label for="autosave-original-source">Source Filename</label>
               <select id="autosave-original-source">
@@ -126,10 +155,6 @@
           </div>
         </div>
       </div>
-
-      <div class="sidebar-footer">
-        <p>Portable Environment</p>
-      </div>
     </aside>
 
     <!-- Main Content Area -->
@@ -149,6 +174,9 @@
               <div class="panel-header">
                 <div class="panel-title-icon qwen-icon" style="background-color: var(--accent);"></div>
                 <h3>Prompt Editor</h3>
+                <div class="header-actions">
+                  <button id="btn-import-prompt" class="btn btn-mini" title="Import positive/negative prompts and slot images from a ComfyUI PNG or JSON workflow">Import Prompt</button>
+                </div>
                 <span class="badge" id="qwen-params-count">0 prompts</span>
               </div>
               <div class="panel-body scrollable">
@@ -175,10 +203,14 @@
 
 
             <!-- Action Area -->
-            <div class="action-bar">
-              <button id="btn-generate" class="btn btn-primary btn-large btn-disabled" disabled>
+            <div class="action-bar btn-group">
+              <button id="btn-run" class="btn btn-primary btn-large btn-disabled" disabled>
                 <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                <span>Generate Image</span>
+                <span>Run</span>
+              </button>
+              <button id="btn-stop" class="btn btn-danger btn-large btn-disabled" disabled>
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/></svg>
+                <span>Stop</span>
               </button>
             </div>
             
@@ -204,6 +236,10 @@
                     <span class="detail-value" id="current-node">Idle</span>
                   </div>
                   <div class="detail-row">
+                    <span class="detail-label">Job Time:</span>
+                    <span class="detail-value" id="job-time">0s</span>
+                  </div>
+                  <div class="detail-row">
                     <span class="detail-label">Progress:</span>
                     <span class="detail-value" id="progress-text">0% (0/0)</span>
                   </div>
@@ -221,6 +257,11 @@
                 <div class="panel-title-icon image-icon"></div>
                 <h3>Output Preview</h3>
                 <div class="header-actions">
+                  <select id="compare-source-select" class="compare-select">
+                    <option value="slot1">Ref: Slot 1</option>
+                    <option value="slot2">Ref: Slot 2</option>
+                    <option value="slot3">Ref: Slot 3</option>
+                  </select>
                   <button id="btn-compare" class="btn btn-mini" disabled>Compare</button>
                   <button id="btn-open-image" class="btn btn-mini">Open in Viewer</button>
                 </div>
@@ -269,57 +310,381 @@
           <h2>Parameter Configuration</h2>
           <p>Configure dynamic generation parameters extracted from the workflow</p>
         </div>
-        <!-- Card: Workflow Import -->
-        <div class="panel workflow-panel">
-          <div class="panel-header">
-            <div class="panel-title-icon workflow-icon"></div>
-            <h3>Workflow JSON</h3>
+        <div class="dashboard-grid">
+          <!-- Left Column -->
+          <div class="grid-col flex-col gap-2">
+            <!-- Card: Workflow Import -->
+            <div class="panel workflow-panel">
+              <div class="panel-header">
+                <div class="panel-title-icon workflow-icon"></div>
+                <h3>Workflow JSON</h3>
+              </div>
+              <div class="panel-body">
+                <!-- Row 1: Web UI format (for PNG metadata embedding) -->
+                <div class="wf-row-label">Web UI Format</div>
+                <div class="workflow-file-row">
+                  <input type="text" id="webui-workflow-filename" class="workflow-filename-input"
+                         readonly placeholder="No workflow loaded…">
+                  <button id="btn-load-webui-workflow" class="btn btn-secondary btn-small"
+                          title="Load Web UI format JSON (.json saved normally from ComfyUI)">
+                    <span>Load</span>
+                  </button>
+                </div>
+
+                <!-- Row 2: API format (used to send prompts to ComfyUI) -->
+                <div class="wf-row-label" style="margin-top:10px;">API Format</div>
+                <div class="workflow-file-row">
+                  <input type="text" id="workflow-filename" class="workflow-filename-input"
+                         readonly placeholder="No workflow loaded…">
+                  <button id="btn-load-workflow" class="btn btn-ghost btn-small"
+                          title="Load API format JSON (Save (API Format) from ComfyUI)">
+                    <span>Load</span>
+                  </button>
+                </div>
+
+                <!-- Hidden – kept for JS reset logic -->
+                <button id="btn-reload-workflow" style="display:none;"></button>
+              </div>
+            </div>
+
+            <!-- Workflow Parameters Panel -->
+            <div class="panel params-panel standalone-params-panel" style="flex: 1; min-height: 0;">
+              <div class="panel-header">
+                <div class="panel-title-icon params-icon"></div>
+                <h3>Workflow Parameters</h3>
+                <span class="badge" id="params-count">0 parameters detected</span>
+              </div>
+              <div class="panel-body scrollable">
+                <div id="no-params-msg" class="empty-state">
+                  <p>Please load a workflow first to extract configuration parameters</p>
+                </div>
+                
+                <div id="dynamic-params-container" class="params-container hidden">
+                  <!-- Dynamically inserted prompt parameters go here -->
+                </div>
+              </div>
+            </div>
           </div>
-          <div class="panel-body">
 
-            <!-- Row 1: Web UI format (for PNG metadata embedding) -->
-            <div class="wf-row-label">Web UI Format</div>
-            <div class="workflow-file-row">
-              <input type="text" id="webui-workflow-filename" class="workflow-filename-input"
-                     readonly placeholder="No workflow loaded…">
-              <button id="btn-load-webui-workflow" class="btn btn-secondary btn-small"
-                      title="Load Web UI format JSON (.json saved normally from ComfyUI)">
-                <span>Load</span>
-              </button>
+          <!-- Right Column -->
+          <div class="grid-col flex-col gap-2">
+            <!-- Model Loader Card (dynamically populated) -->
+            <div class="panel params-panel standalone-params-panel hidden" id="loaders-panel">
+              <div class="panel-header">
+                <div class="panel-title-icon loaders-icon" style="background-color: var(--accent);"></div>
+                <h3>Model Loaders</h3>
+              </div>
+              <div class="panel-body scrollable">
+                <div id="loaders-params-container" class="params-container"></div>
+              </div>
             </div>
 
-            <!-- Row 2: API format (used to send prompts to ComfyUI) -->
-            <div class="wf-row-label" style="margin-top:10px;">API Format</div>
-            <div class="workflow-file-row">
-              <input type="text" id="workflow-filename" class="workflow-filename-input"
-                     readonly placeholder="No workflow loaded…">
-              <button id="btn-load-workflow" class="btn btn-ghost btn-small"
-                      title="Load API format JSON (Save (API Format) from ComfyUI)">
-                <span>Load</span>
-              </button>
+            <!-- Qwen Canvas Card (dynamically populated) -->
+            <div class="panel params-panel standalone-params-panel hidden" id="qwen-canvas-panel">
+              <div class="panel-header">
+                <div class="panel-title-icon canvas-icon" style="background-color: var(--accent);"></div>
+                <h3>🔥 Qwen Canvas</h3>
+              </div>
+              <div class="panel-body scrollable">
+                <div id="qwen-canvas-params-container" class="params-container"></div>
+              </div>
             </div>
-
-            <!-- Hidden – kept for JS reset logic -->
-            <button id="btn-reload-workflow" style="display:none;"></button>
-
           </div>
         </div>
+      </section>
 
-        <div class="panel params-panel standalone-params-panel">
-          <div class="panel-header">
-            <div class="panel-title-icon params-icon"></div>
-            <h3>Workflow Parameters</h3>
-            <span class="badge" id="params-count">0 parameters detected</span>
-          </div>
-          <div class="panel-body scrollable">
-            <div id="no-params-msg" class="empty-state">
-              <p>Please load a workflow first to extract configuration parameters</p>
-            </div>
+      <!-- Tab: Face Fusion -->
+      <section id="tab-facefusion" class="tab-pane">
+        <div class="top-header">
+          <h2>Face Fusion</h2>
+          <p>Configure parameters and run the standalone Facefusion application locally</p>
+        </div>
+        
+        <div class="dashboard-grid">
+          
+          <!-- Column 1: Config & Parameters -->
+          <div class="grid-col flex-col gap-2 scrollable-col" style="overflow-y: auto; padding-right: 4px;">
             
-            <div id="dynamic-params-container" class="params-container hidden">
-              <!-- Dynamically inserted prompt parameters go here -->
+            <!-- Paths Configuration -->
+            <div class="panel">
+              <div class="panel-header">
+                <div class="panel-title-icon"></div>
+                <h3>Paths Configuration</h3>
+              </div>
+              <div class="panel-body">
+                <div class="input-group">
+                  <label for="ff-env-type">Python Environment Type</label>
+                  <select id="ff-env-type">
+                    <option value="conda">Conda Environment (Recommended)</option>
+                    <option value="venv">Virtualenv / Local Python (python.exe)</option>
+                  </select>
+                </div>
+                <div class="input-group">
+                  <label for="ff-folder-path">Facefusion Directory</label>
+                  <div class="workflow-file-row">
+                    <input type="text" id="ff-folder-path" class="workflow-filename-input" value="C:\facefusion" placeholder="e.g. C:\facefusion">
+                    <button id="btn-select-ff-folder" class="btn btn-secondary btn-small" style="width: auto;">
+                      <span>Browse...</span>
+                    </button>
+                  </div>
+                </div>
+                <!-- Conda environment configuration -->
+                <div class="input-group" id="ff-conda-group">
+                  <label for="ff-conda-path">Conda Executable Path</label>
+                  <div class="workflow-file-row">
+                    <input type="text" id="ff-conda-path" class="workflow-filename-input" value="C:\ProgramData\miniconda3\Scripts\conda.exe" placeholder="e.g. C:\ProgramData\miniconda3\Scripts\conda.exe or conda">
+                    <button id="btn-select-ff-conda-path" class="btn btn-secondary btn-small" style="width: auto;">
+                      <span>Browse...</span>
+                    </button>
+                  </div>
+                  
+                  <label for="ff-conda-env" style="margin-top: 10px;">Conda Env Name</label>
+                  <input type="text" id="ff-conda-env" value="facefusion" placeholder="e.g. facefusion">
+                </div>
+                <!-- Virtualenv executable path -->
+                <div class="input-group hidden" id="ff-venv-group">
+                  <label for="ff-python-path">Python Executable Path</label>
+                  <div class="workflow-file-row">
+                    <input type="text" id="ff-python-path" class="workflow-filename-input" value="C:\facefusion\.venv\Scripts\python.exe" placeholder="e.g. C:\facefusion\.venv\Scripts\python.exe">
+                    <button id="btn-select-ff-python" class="btn btn-secondary btn-small" style="width: auto;">
+                      <span>Browse...</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
+
+            <!-- Face Fusion Inputs -->
+            <div class="panel">
+              <div class="panel-header">
+                <div class="panel-title-icon"></div>
+                <h3>Source & Target Media</h3>
+              </div>
+              <div class="panel-body" style="gap: 16px;">
+                <!-- Source Face Slot -->
+                <div class="ff-media-slot">
+                  <div class="ff-slot-label">Source Face Image:</div>
+                  <div class="ff-slot-row">
+                    <input type="text" id="ff-source-path-display" class="workflow-filename-input" readonly placeholder="Select a face image (.jpg, .png...)">
+                    <button id="btn-select-ff-source" class="btn btn-secondary btn-small" style="width: auto;">
+                      <span>Browse...</span>
+                    </button>
+                  </div>
+                  <div class="ff-media-preview-container">
+                    <img id="ff-source-preview" class="ff-preview-thumbnail hidden" src="">
+                    <div id="ff-source-preview-placeholder" class="ff-preview-placeholder">No image selected</div>
+                  </div>
+                </div>
+
+                <!-- Target Media Slot -->
+                <div class="ff-media-slot">
+                  <div class="ff-slot-label">Target Image or Video:</div>
+                  <div class="ff-slot-row">
+                    <input type="text" id="ff-target-path-display" class="workflow-filename-input" readonly placeholder="Select target image or video (.mp4, .jpg...)">
+                    <button id="btn-select-ff-target" class="btn btn-secondary btn-small" style="width: auto;">
+                      <span>Browse...</span>
+                    </button>
+                  </div>
+                  <div class="ff-media-preview-container">
+                    <img id="ff-target-preview-img" class="ff-preview-thumbnail hidden" src="">
+                    <video id="ff-target-preview-vid" class="ff-preview-thumbnail hidden" controls style="max-width: 100%; max-height: 120px; border-radius: 6px;"></video>
+                    <div id="ff-target-preview-placeholder" class="ff-preview-placeholder">No media selected</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Processors & Acceleration -->
+            <div class="panel">
+              <div class="panel-header">
+                <div class="panel-title-icon"></div>
+                <h3>Processors & Acceleration</h3>
+              </div>
+              <div class="panel-body" style="gap: 14px;">
+                <div class="input-group">
+                  <label>Frame Processors</label>
+                  <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 6px;">
+                    <div class="checkbox-row">
+                      <input type="checkbox" id="ff-proc-swapper" class="autosave-checkbox" checked>
+                      <label for="ff-proc-swapper">face_swapper (Face Swap)</label>
+                    </div>
+                    <div class="checkbox-row">
+                      <input type="checkbox" id="ff-proc-enhancer" class="autosave-checkbox">
+                      <label for="ff-proc-enhancer">face_enhancer (Face Restore/GFPGAN)</label>
+                    </div>
+                    <div class="checkbox-row">
+                      <input type="checkbox" id="ff-proc-lip-syncer" class="autosave-checkbox">
+                      <label for="ff-proc-lip-syncer">lip_syncer (Sync Lip to Audio)</label>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="input-group">
+                  <label for="ff-execution-provider">Execution Provider</label>
+                  <select id="ff-execution-provider">
+                    <option value="cuda">CUDA (NVIDIA GPU)</option>
+                    <option value="cpu">CPU (Slow)</option>
+                    <option value="directml">DirectML (Windows AMD/Intel GPU)</option>
+                    <option value="openvino">OpenVINO</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <!-- Face Fusion Advanced Settings -->
+            <div class="panel">
+              <div class="panel-header">
+                <div class="panel-title-icon"></div>
+                <h3>Advanced Settings</h3>
+              </div>
+              <div class="panel-body" style="gap: 14px;">
+                <div class="input-group">
+                  <label for="ff-swapper-model">Face Swapper Model</label>
+                  <select id="ff-swapper-model">
+                    <option value="inswapper_128">inswapper_128 (Default)</option>
+                    <option value="inswapper_128_fp16">inswapper_128_fp16</option>
+                    <option value="blendswap_256">blendswap_256</option>
+                    <option value="simswap_256">simswap_256</option>
+                    <option value="simswap_unofficial_512">simswap_unofficial_512</option>
+                    <option value="ghost_1_256">ghost_1_256</option>
+                    <option value="ghost_2_256">ghost_2_256</option>
+                    <option value="ghost_3_256">ghost_3_256</option>
+                    <option value="hififace_unofficial_256">hififace_unofficial_256</option>
+                    <option value="hyperswap_1a_256">hyperswap_1a_256</option>
+                    <option value="hyperswap_1b_256">hyperswap_1b_256</option>
+                    <option value="hyperswap_1c_256">hyperswap_1c_256</option>
+                    <option value="uniface_256">uniface_256</option>
+                  </select>
+                </div>
+
+                <div class="input-group">
+                  <label for="ff-swapper-pixel-boost">Face Swapper Pixel Boost</label>
+                  <select id="ff-swapper-pixel-boost">
+                    <option value="">None (Default)</option>
+                    <option value="128x128">128x128</option>
+                    <option value="256x256">256x256</option>
+                    <option value="384x384">384x384</option>
+                    <option value="512x512">512x512</option>
+                    <option value="768x768">768x768</option>
+                    <option value="1024x1024">1024x1024</option>
+                  </select>
+                </div>
+
+                <div class="input-group">
+                  <label for="ff-swapper-weight-range">Face Swapper Weight</label>
+                  <div style="display: flex; align-items: center; gap: 10px;">
+                    <input type="range" id="ff-swapper-weight-range" min="0" max="1" step="0.05" value="1.0" style="flex: 1;">
+                    <input type="number" id="ff-swapper-weight-number" min="0" max="1" step="0.05" value="1.0" style="width: 60px; text-align: center; background-color: var(--bg-secondary); border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; color: var(--text-main); font-size: 13px;">
+                  </div>
+                </div>
+
+                <div class="input-group">
+                  <label for="ff-selector-mode">Face Selector Mode</label>
+                  <select id="ff-selector-mode">
+                    <option value="reference">reference (Default)</option>
+                    <option value="many">many</option>
+                    <option value="one">one</option>
+                  </select>
+                </div>
+
+                <div class="input-group">
+                  <label for="ff-selector-order">Face Selector Order</label>
+                  <select id="ff-selector-order">
+                    <option value="large-small">large-small (Default)</option>
+                    <option value="small-large">small-large</option>
+                    <option value="left-right">left-right</option>
+                    <option value="right-left">right-left</option>
+                    <option value="top-bottom">top-bottom</option>
+                    <option value="bottom-top">bottom-top</option>
+                    <option value="best-worst">best-worst</option>
+                    <option value="worst-best">worst-best</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <!-- Actions Bar -->
+            <div class="action-bar btn-group">
+              <button id="btn-run-ff" class="btn btn-primary btn-large">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                <span>Run Face Fusion</span>
+              </button>
+              <button id="btn-stop-ff" class="btn btn-danger btn-large btn-disabled" disabled>
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/></svg>
+                <span>Stop</span>
+              </button>
+            </div>
+
           </div>
+
+          <!-- Column 2: Status & Preview -->
+          <div class="grid-col flex-col gap-2 scrollable-col" style="overflow-y: auto; padding-right: 4px;">
+            
+            <!-- Execution Monitor -->
+            <div class="panel">
+              <div class="panel-header">
+                <div class="panel-title-icon"></div>
+                <h3>Process Monitor</h3>
+              </div>
+              <div class="panel-body">
+                <div class="progress-details" style="grid-template-columns: repeat(3, 1fr); margin-bottom: 0;">
+                  <div class="detail-row">
+                    <span class="detail-label">Status:</span>
+                    <span class="detail-value" id="ff-status-text">Idle</span>
+                  </div>
+                  <div class="detail-row">
+                    <span class="detail-label">Time Spent:</span>
+                    <span class="detail-value" id="ff-time-text">-</span>
+                  </div>
+                  <div class="detail-row">
+                    <span class="detail-label">Progress:</span>
+                    <span class="detail-value" id="ff-progress-text">0%</span>
+                  </div>
+                </div>
+                <div class="progress-track" style="margin-top: 16px;">
+                  <div class="progress-bar" id="ff-progress-fill" style="width: 0%"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Console logs -->
+            <div class="panel" style="flex: 1; min-height: 200px;">
+              <div class="panel-header">
+                <div class="panel-title-icon"></div>
+                <h3>Console Output Log</h3>
+                <button id="btn-clear-ff-console" class="btn btn-ghost btn-small" style="width: auto; padding: 2px 8px; font-size: 11px;">Clear Log</button>
+              </div>
+              <div class="panel-body scrollable" style="background-color: #050811; padding: 12px; font-family: monospace; font-size: 12px; color: #a4b1cd; overflow-y: auto;">
+                <pre id="ff-console-logs" style="margin: 0; white-space: pre-wrap; word-break: break-all;"></pre>
+              </div>
+            </div>
+
+            <!-- Live Output Preview -->
+            <div class="panel" style="flex: 1.5; min-height: 250px;">
+              <div class="panel-header">
+                <div class="panel-title-icon"></div>
+                <h3>Output Preview</h3>
+                <div class="header-actions">
+                  <button id="btn-ff-open-output-folder" class="btn btn-mini">Open Folder</button>
+                  <button id="btn-ff-open-viewer" class="btn btn-mini" disabled>Open in Viewer</button>
+                </div>
+              </div>
+              <div class="panel-body flex-center relative" style="padding: 12px;">
+                <div id="ff-output-empty" class="image-empty-state">
+                  <svg class="gallery-placeholder-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                  <p>Face Fusion output will be displayed here</p>
+                </div>
+                <div id="ff-output-image-container" class="image-container hidden">
+                  <img id="ff-result-img" src="" alt="Facefusion Output Image" style="max-height: 100%; max-width: 100%; border-radius: 6px;">
+                </div>
+                <div id="ff-output-video-container" class="image-container hidden" style="width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;">
+                  <video id="ff-result-vid" src="" alt="Facefusion Output Video" style="max-height: 100%; max-width: 100%; border-radius: 6px;" controls></video>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
         </div>
       </section>
 
@@ -373,6 +738,27 @@
     </main>
 
   </div>
+
+  <!-- Connection Alert Modal -->
+  <div id="connection-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-icon-container">
+        <svg class="modal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+          <line x1="12" y1="9" x2="12" y2="13"></line>
+          <line x1="12" y1="17" x2="12.01" y2="17"></line>
+        </svg>
+      </div>
+      <h3 class="modal-title">Connection Required</h3>
+      <p class="modal-message">ComfyUI is not connected. Please ensure ComfyUI is running and your service connection settings are correct.</p>
+      <p id="modal-error-msg" class="modal-error hidden"></p>
+      <div class="modal-actions">
+        <button id="btn-modal-configure" class="btn btn-primary">Go to Connection Settings</button>
+        <button id="btn-modal-retry" class="btn btn-secondary">Retry Connection</button>
+      </div>
+    </div>
+  </div>
+
   <script src="renderer.js"></script>
 </body>
 </html>

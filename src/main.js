@@ -147,11 +147,44 @@ app.on('window-all-closed', function () {
   if (process.platform !== 'darwin') app.quit();
 });
 
+// Helper to find the matching sister workflow file (api <=> webui)
+function getSisterFilePath(filePath) {
+  const dir = path.dirname(filePath);
+  const ext = path.extname(filePath);
+  const base = path.basename(filePath, ext);
+
+  const webuiMatch = base.match(/webui/i);
+  const apiMatch = base.match(/api/i);
+
+  let newBase = null;
+  if (webuiMatch) {
+    newBase = base.replace(/webui/gi, (match) => {
+      if (match === 'WEBUI') return 'API';
+      if (match === 'Webui') return 'Api';
+      return 'api';
+    });
+  } else if (apiMatch) {
+    newBase = base.replace(/api/gi, (match) => {
+      if (match === 'API') return 'WEBUI';
+      if (match === 'Api') return 'Webui';
+      return 'webui';
+    });
+  }
+
+  if (newBase && newBase !== base) {
+    const sisterPath = path.join(dir, newBase + ext);
+    if (fs.existsSync(sisterPath)) {
+      return sisterPath;
+    }
+  }
+  return null;
+}
+
 // IPC handlers for local files and workflows
 ipcMain.handle('select-workflow-file', async () => {
   const defaultPath = path.join(app.getAppPath(), 'workflow');
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: 'Select ComfyUI API Workflow JSON File',
+    title: 'Select ComfyUI Workflow JSON File',
     defaultPath: defaultPath,
     filters: [
       { name: 'JSON Files', extensions: ['json'] }
@@ -166,25 +199,46 @@ ipcMain.handle('select-workflow-file', async () => {
   try {
     const filePath = result.filePaths[0];
     const fileContent = fs.readFileSync(filePath, 'utf-8');
-    return {
+    const response = {
       fileName: path.basename(filePath),
       filePath: filePath,
       content: JSON.parse(fileContent)
     };
+
+    // Try to auto-detect and read sister file
+    try {
+      const sisterPath = getSisterFilePath(filePath);
+      if (sisterPath) {
+        const sisterContent = fs.readFileSync(sisterPath, 'utf-8');
+        response.sister = {
+          fileName: path.basename(sisterPath),
+          filePath: sisterPath,
+          content: JSON.parse(sisterContent)
+        };
+      }
+    } catch (sisterErr) {
+      console.error('Failed to read or parse sister workflow JSON:', sisterErr);
+    }
+
+    return response;
   } catch (err) {
     throw new Error('Failed to read or parse workflow JSON: ' + err.message);
   }
 });
 
 // Select an image file for LoadImage node
-ipcMain.handle('select-image-file', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
+ipcMain.handle('select-image-file', async (event, defaultPath) => {
+  const options = {
     title: 'Select Image File',
     filters: [
       { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif'] }
     ],
     properties: ['openFile']
-  });
+  };
+  if (defaultPath && fs.existsSync(defaultPath)) {
+    options.defaultPath = defaultPath;
+  }
+  const result = await dialog.showOpenDialog(mainWindow, options);
 
   if (result.canceled || result.filePaths.length === 0) {
     return null;
@@ -195,6 +249,75 @@ ipcMain.handle('select-image-file', async () => {
     filePath: filePath,
     fileName: path.basename(filePath)
   };
+});
+
+// Select a target media file (image or video) for Facefusion
+ipcMain.handle('select-ff-target-file', async (event, defaultPath) => {
+  const options = {
+    title: 'Select Target Image or Video File',
+    filters: [
+      { name: 'Media Files (Images & Videos)', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'mp4', 'avi', 'mkv', 'mov', 'webm'] }
+    ],
+    properties: ['openFile']
+  };
+  if (defaultPath && fs.existsSync(defaultPath)) {
+    options.defaultPath = defaultPath;
+  }
+  const result = await dialog.showOpenDialog(mainWindow, options);
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+
+  const filePath = result.filePaths[0];
+  return {
+    filePath: filePath,
+    fileName: path.basename(filePath)
+  };
+});
+
+// Select Python executable file
+ipcMain.handle('select-python-exe', async (event, defaultPath) => {
+  const options = {
+    title: 'Select Python Executable (python.exe)',
+    filters: [
+      { name: 'Python Executable (python.exe)', extensions: ['exe'] },
+      { name: 'All Files', extensions: ['*'] }
+    ],
+    properties: ['openFile']
+  };
+  if (defaultPath && fs.existsSync(defaultPath)) {
+    options.defaultPath = defaultPath;
+  }
+  const result = await dialog.showOpenDialog(mainWindow, options);
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+
+  return result.filePaths[0];
+});
+
+// Select Conda executable file
+ipcMain.handle('select-conda-exe', async (event, defaultPath) => {
+  const options = {
+    title: 'Select Conda Executable (conda.exe)',
+    filters: [
+      { name: 'Conda Executable (conda.exe)', extensions: ['exe'] },
+      { name: 'All Files', extensions: ['*'] }
+    ],
+    properties: ['openFile']
+  };
+  if (defaultPath && fs.existsSync(defaultPath)) {
+    options.defaultPath = defaultPath;
+  }
+  const result = await dialog.showOpenDialog(mainWindow, options);
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+
+  return result.filePaths[0];
 });
 
 // Upload image to ComfyUI via HTTP API /upload/image
@@ -233,11 +356,15 @@ ipcMain.handle('upload-image-to-comfyui', async (event, { filePath, comfyUrl }) 
 });
 
 // Select output folder for saving generated images
-ipcMain.handle('select-output-folder', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
+ipcMain.handle('select-output-folder', async (event, defaultPath) => {
+  const options = {
     title: 'Select Folder to Auto-Save Generated Images',
     properties: ['openDirectory', 'createDirectory']
-  });
+  };
+  if (defaultPath && fs.existsSync(defaultPath)) {
+    options.defaultPath = defaultPath;
+  }
+  const result = await dialog.showOpenDialog(mainWindow, options);
 
   if (result.canceled || result.filePaths.length === 0) {
     return null;
@@ -306,8 +433,8 @@ ipcMain.handle('save-image-to-folder', async (event, { url, folderPath, filename
 // Check if file exists in the folder
 ipcMain.handle('check-file-exists', async (event, { folderPath, filename }) => {
   try {
-    if (!folderPath || !filename) return false;
-    const targetPath = path.join(folderPath, filename);
+    if (!filename) return false;
+    const targetPath = folderPath ? path.join(folderPath, filename) : filename;
     return fs.existsSync(targetPath);
   } catch (err) {
     return false;
@@ -408,3 +535,312 @@ ipcMain.handle('log-debug', async (event, { message }) => {
     return { ok: false, error: error.message };
   }
 });
+
+// ─── Face Fusion Standalone Subprocess Control ───────────────────────────────
+let activeFacefusionProcess = null;
+
+ipcMain.handle('run-facefusion', async (event, { envType, condaEnvName, condaPath, facefusionPath, pythonPath, sourcePath, targetPath, outputPath, processors, executionProviders, faceSwapperModel, faceSwapperPixelBoost, faceSwapperWeight, faceSelectorMode, faceSelectorOrder }) => {
+  if (activeFacefusionProcess) {
+    return { ok: false, error: 'A Facefusion process is already running.' };
+  }
+
+  return new Promise((resolve) => {
+    try {
+      const { spawn } = require('child_process');
+      
+      const useShell = (envType === 'conda');
+      const quoteArg = (arg) => {
+        if (!useShell) return arg;
+        if (typeof arg !== 'string') return arg;
+        if (arg.startsWith('"') && arg.endsWith('"')) return arg;
+        if (/[ &`()^#;|[\]]/.test(arg) || arg.includes(' ')) {
+          return `"${arg}"`;
+        }
+        return arg;
+      };
+
+      let command = 'python';
+      let args = [];
+
+      if (envType === 'conda') {
+        command = condaPath || 'conda';
+        if (useShell && command.includes(' ') && !command.startsWith('"')) {
+          command = `"${command}"`;
+        }
+        args = [
+          'run',
+          '-n', condaEnvName || 'facefusion',
+          'python',
+          'facefusion.py',
+          'headless-run',
+          '--source-paths', quoteArg(sourcePath),
+          '--target-path', quoteArg(targetPath),
+          '--output-path', quoteArg(outputPath)
+        ];
+      } else {
+        command = pythonPath || 'python';
+        if (useShell && command.includes(' ') && !command.startsWith('"')) {
+          command = `"${command}"`;
+        }
+        args = [
+          'facefusion.py',
+          'headless-run',
+          '--source-paths', quoteArg(sourcePath),
+          '--target-path', quoteArg(targetPath),
+          '--output-path', quoteArg(outputPath)
+        ];
+      }
+
+      if (processors && processors.length > 0) {
+        args.push('--processors');
+        args.push(...processors.map(quoteArg));
+      }
+
+      if (executionProviders && executionProviders.length > 0) {
+        args.push('--execution-providers');
+        args.push(...executionProviders.map(quoteArg));
+      }
+
+      if (faceSwapperModel) {
+        args.push('--face-swapper-model', quoteArg(faceSwapperModel));
+      }
+      if (faceSwapperPixelBoost) {
+        args.push('--face-swapper-pixel-boost', quoteArg(faceSwapperPixelBoost));
+      }
+      if (faceSwapperWeight !== undefined && faceSwapperWeight !== null && faceSwapperWeight !== '') {
+        args.push('--face-swapper-weight', quoteArg(String(faceSwapperWeight)));
+      }
+      if (faceSelectorMode) {
+        args.push('--face-selector-mode', quoteArg(faceSelectorMode));
+      }
+      if (faceSelectorOrder) {
+        args.push('--face-selector-order', quoteArg(faceSelectorOrder));
+      }
+
+      const spawnOptions = {
+        cwd: facefusionPath,
+        env: { ...process.env, PYTHONUNBUFFERED: '1' }, // ensure logs are flushed immediately
+        shell: useShell
+      };
+
+      // Log start command
+      const displayCommand = command.startsWith('"') ? command : `"${command}"`;
+      const cmdString = envType === 'conda'
+        ? `${displayCommand} run -n ${condaEnvName || 'facefusion'} python facefusion.py ${args.slice(5).join(' ')}`
+        : `${displayCommand} ${args.join(' ')}`;
+      event.sender.send('facefusion-log', { type: 'system', text: `Running command in ${facefusionPath} (env: ${envType}):\n${cmdString}\n` });
+
+      activeFacefusionProcess = spawn(command, args, spawnOptions);
+
+      activeFacefusionProcess.stdout.on('data', (data) => {
+        const text = data.toString();
+        event.sender.send('facefusion-log', { type: 'stdout', text });
+
+        // Parse progress if possible (e.g. "Processing: 45%" or "45%")
+        const progressMatch = text.match(/Processing:\s*(\d+)%/i) || text.match(/(\d+)%/);
+        if (progressMatch) {
+          const percent = parseInt(progressMatch[1], 10);
+          event.sender.send('facefusion-progress', { percent });
+        }
+      });
+
+      activeFacefusionProcess.stderr.on('data', (data) => {
+        const text = data.toString();
+        event.sender.send('facefusion-log', { type: 'stderr', text });
+        
+        // Some libraries print progress on stderr
+        const progressMatch = text.match(/Processing:\s*(\d+)%/i) || text.match(/(\d+)%/);
+        if (progressMatch) {
+          const percent = parseInt(progressMatch[1], 10);
+          event.sender.send('facefusion-progress', { percent });
+        }
+      });
+
+      activeFacefusionProcess.on('close', (code) => {
+        activeFacefusionProcess = null;
+        event.sender.send('facefusion-log', { type: 'system', text: `\nProcess finished with exit code ${code}\n` });
+        resolve({ ok: code === 0, code });
+      });
+
+      activeFacefusionProcess.on('error', (err) => {
+        activeFacefusionProcess = null;
+        event.sender.send('facefusion-log', { type: 'error', text: `\nProcess error: ${err.message}\n` });
+        resolve({ ok: false, error: err.message });
+      });
+
+    } catch (err) {
+      activeFacefusionProcess = null;
+      resolve({ ok: false, error: err.message });
+    }
+  });
+});
+
+ipcMain.handle('stop-facefusion', async () => {
+  if (activeFacefusionProcess) {
+    try {
+      const pid = activeFacefusionProcess.pid;
+      if (process.platform === 'win32') {
+        const { exec } = require('child_process');
+        exec(`taskkill /F /T /PID ${pid}`);
+      } else {
+        activeFacefusionProcess.kill('SIGINT');
+        const proc = activeFacefusionProcess;
+        setTimeout(() => {
+          try { proc.kill('SIGKILL'); } catch (e) {}
+        }, 1000);
+      }
+      activeFacefusionProcess = null;
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  }
+  return { ok: false, error: 'No process is currently running.' };
+});
+
+// Import prompts and images from ComfyUI generated PNG or JSON workflow
+ipcMain.handle('import-prompt-file', async (event, defaultPath) => {
+  const options = {
+    title: 'Select ComfyUI Generated Image or JSON Workflow',
+    filters: [
+      { name: 'ComfyUI Files (PNG Images, JSON Workflows)', extensions: ['png', 'json'] }
+    ],
+    properties: ['openFile']
+  };
+
+  if (defaultPath && fs.existsSync(defaultPath)) {
+    options.defaultPath = defaultPath;
+  }
+
+  const result = await dialog.showOpenDialog(mainWindow, options);
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+
+  try {
+    const filePath = result.filePaths[0];
+    const ext = path.extname(filePath).toLowerCase();
+    
+    if (ext === '.json') {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const parsed = JSON.parse(content);
+      // Validate ComfyUI JSON format
+      const keys = Object.keys(parsed);
+      const hasNumericKeys = keys.some(k => !isNaN(parseInt(k)));
+      const isWebUiFormat = Array.isArray(parsed.nodes);
+      
+      if (!hasNumericKeys && !isWebUiFormat) {
+        return { ok: false, error: 'This file does not contain the required data to be extracted.' };
+      }
+      return { ok: true, type: 'json', content: parsed, filePath: filePath };
+    } else if (ext === '.png') {
+      const fileBuffer = fs.readFileSync(filePath);
+      const textChunks = extractPngTextChunks(fileBuffer);
+      if (textChunks && textChunks.prompt) {
+        const parsed = JSON.parse(textChunks.prompt);
+        return { ok: true, type: 'png_prompt', content: parsed, filePath: filePath };
+      } else if (textChunks && textChunks.workflow) {
+        const parsed = JSON.parse(textChunks.workflow);
+        return { ok: true, type: 'png_workflow', content: parsed, filePath: filePath };
+      } else {
+        return { ok: false, error: 'No workflow metadata found in this PNG file.' };
+      }
+    }
+    return { ok: false, error: 'Unsupported file type.' };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+// ─── Folder Watching for Automation ──────────────────────────────────────────
+let activeWatcher = null;
+let watchedDir = null;
+const existingFiles = new Set();
+const fileTimeouts = new Map();
+
+function stopWatching() {
+  if (activeWatcher) {
+    activeWatcher.close();
+    activeWatcher = null;
+  }
+  watchedDir = null;
+  existingFiles.clear();
+  for (const timeout of fileTimeouts.values()) {
+    clearTimeout(timeout);
+  }
+  fileTimeouts.clear();
+}
+
+ipcMain.handle('start-watching-folder', async (event, folderPath) => {
+  stopWatching();
+  
+  if (!folderPath || !fs.existsSync(folderPath)) {
+    return { ok: false, error: 'Folder does not exist' };
+  }
+
+  try {
+    watchedDir = folderPath;
+    
+    // Scan existing files so we only trigger on newly added files
+    const files = fs.readdirSync(folderPath);
+    for (const f of files) {
+      existingFiles.add(path.join(folderPath, f).toLowerCase());
+    }
+
+    activeWatcher = fs.watch(folderPath, (eventType, filename) => {
+      if (!filename) return;
+      const fullPath = path.join(folderPath, filename);
+      const fullPathLower = fullPath.toLowerCase();
+
+      // Check if it's a supported image file extension
+      const ext = path.extname(filename).toLowerCase();
+      if (!['.png', '.jpg', '.jpeg', '.webp', '.bmp'].includes(ext)) {
+        return;
+      }
+
+      if (existingFiles.has(fullPathLower)) {
+        return;
+      }
+
+      // Debounce events to allow file writing to finish
+      if (fileTimeouts.has(fullPathLower)) {
+        clearTimeout(fileTimeouts.get(fullPathLower));
+      }
+
+      const timeout = setTimeout(() => {
+        fileTimeouts.delete(fullPathLower);
+        try {
+          if (fs.existsSync(fullPath)) {
+            const stats = fs.statSync(fullPath);
+            if (stats.isFile() && stats.size > 0) {
+              existingFiles.add(fullPathLower);
+              if (mainWindow) {
+                mainWindow.webContents.send('watch-folder-new-image', {
+                  filePath: fullPath,
+                  fileName: filename
+                });
+              }
+            }
+          }
+        } catch (err) {
+          // File might still be locked or busy, ignore this event
+        }
+      }, 500);
+
+      fileTimeouts.set(fullPathLower, timeout);
+    });
+
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('stop-watching-folder', async () => {
+  stopWatching();
+  return { ok: true };
+});
+
+
+

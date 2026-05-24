@@ -32,12 +32,22 @@ let promptSavedPath   = null;  // Local path of the file saved for the current p
 let paramMappings = []; // Array to track custom inputs and their corresponding nodes in the workflow JSON
 let imageSlots = []; // Array of { nodeId, rotateNodeId, enabled, rotation } — one entry per LoadImage node found in workflow
 let historyImages = [];
+let savedPromptIds = new Set();
+let completedPromptIds = new Set();
+let myQueuedPromptIds = new Set();
 let outputFolderPath = '';
+let watchFolderPath = '';
 let currentPreviewUrl = null; // Stores object URL for active generation's in-progress preview
 let lastSubmittedWorkflow = null; // Snapshot of the workflow actually sent (with randomized seeds)
 let webUiWorkflow = null;         // Optional web-UI format workflow JSON for PNG metadata embedding
 let isCompareMode = false;        // Active state of image comparison mode
 let selectedCompareSlot = 0;      // Current compare slot selected (0: Slot 1, 1: Slot 2, 2: Slot 3)
+let isStartupCheckActive = true;  // Flag to track the initial startup connection check
+let isRetryingConnection = false; // Flag to track if we are currently retrying the connection from the modal
+
+// Job Timer State
+let jobTimerInterval = null;
+let jobStartTime = null;
 
 // Global progress state for multi-sampler workflow tracking (fully dynamic — discovered from live WS events)
 let totalWorkflowSteps = 0;      // Running estimate of total steps (updated as new sampler nodes are seen)
@@ -46,7 +56,27 @@ let lastSamplerNodeId = null;    // The ID of the KSampler currently (or most re
 let lastSamplerStep = 0;         // Last reported step of the current KSampler node
 let samplerNodeMaxMap = {};       // Maps nodeId -> max steps, discovered from live progress events
 let estimatedSamplerCount = 0;   // Number of sampler nodes in the workflow (used for early estimate)
+let promptSamplerCountsMap = {}; // Maps prompt_id -> estimatedSamplerCount
 
+
+// Helper to map UI rotation ('none', '90', '180', '270') to ComfyUI ImageRotate input ('none', '90 degrees', '180 degrees', '270 degrees')
+function mapUiRotationToComfy(val) {
+  if (val === 'none') return 'none';
+  if (val === '90' || val === '180' || val === '270') {
+    return `${val} degrees`;
+  }
+  return val;
+}
+
+// Helper to map ComfyUI ImageRotate input to UI rotation
+function mapComfyRotationToUi(val) {
+  if (!val || val === 'none') return 'none';
+  const match = val.match(/^(\d+)(?:\s*degrees)?$/i);
+  if (match) {
+    return match[1];
+  }
+  return 'none';
+}
 
 // Helper: Proxy HTTP requests to ComfyUI through Electron Main Process to completely bypass browser CORS limits
 async function comfyFetch(path, options = {}) {
@@ -79,15 +109,110 @@ async function comfyFetch(path, options = {}) {
   };
 }
 
+// Helper to clear history for a specific prompt ID when BOTH image save and workflow execution are completed.
+async function checkAndClearComfyHistory(promptId) {
+  if (!promptId) return;
+  const clearHistoryCheckbox = document.getElementById('autosave-clear-history');
+  const shouldClear = clearHistoryCheckbox ? clearHistoryCheckbox.checked : false;
+  
+  if (window.api && typeof window.api.logDebug === 'function') {
+    window.api.logDebug({ message: `checkAndClearComfyHistory called: promptId=${promptId}, shouldClear=${shouldClear}, saved=${savedPromptIds.has(promptId)}, completed=${completedPromptIds.has(promptId)}` });
+  }
+
+  if (!shouldClear) return;
+
+  if (savedPromptIds.has(promptId) && completedPromptIds.has(promptId)) {
+    try {
+      let foundInHistory = false;
+      let retries = 10; // Max 10 retries (5 seconds total)
+      
+      // Phase 1: Wait for the prompt to appear in the server history database
+      while (retries > 0) {
+        const historyResp = await comfyFetch('/history');
+        const historyData = await historyResp.json();
+        
+        if (historyData && historyData[promptId]) {
+          foundInHistory = true;
+          if (window.api && typeof window.api.logDebug === 'function') {
+            window.api.logDebug({ message: `Prompt ${promptId} found in history after ${10 - retries} retries. Proceeding to delete.` });
+          }
+          break;
+        }
+        
+        // Wait 500ms before checking again
+        await new Promise(resolve => setTimeout(resolve, 500));
+        retries--;
+      }
+
+      if (!foundInHistory) {
+        if (window.api && typeof window.api.logDebug === 'function') {
+          window.api.logDebug({ message: `Warning: Prompt ${promptId} did not appear in ComfyUI history after timeout. Will attempt delete anyway.` });
+        }
+      }
+
+      // Phase 2: Send delete request and verify deletion (retry up to 5 times if needed)
+      let deleteRetries = 5;
+      let isDeleted = false;
+
+      while (deleteRetries > 0 && !isDeleted) {
+        if (window.api && typeof window.api.logDebug === 'function') {
+          window.api.logDebug({ message: `Sending delete request for promptId=${promptId} (attempt ${6 - deleteRetries}/5)` });
+        }
+        
+        await comfyFetch('/history', {
+          method: 'POST',
+          body: { delete: [promptId] }
+        });
+
+        // Wait 300ms for deletion to propagate, then check history again
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        const checkResp = await comfyFetch('/history');
+        const checkData = await checkResp.json();
+        
+        if (!checkData || !checkData[promptId]) {
+          isDeleted = true;
+          if (window.api && typeof window.api.logDebug === 'function') {
+            window.api.logDebug({ message: `Success: Prompt ${promptId} confirmed deleted from ComfyUI history.` });
+          }
+          break;
+        }
+
+        deleteRetries--;
+        await new Promise(resolve => setTimeout(resolve, 500)); // wait a bit before retrying delete
+      }
+
+      if (!isDeleted) {
+        if (window.api && typeof window.api.logDebug === 'function') {
+          window.api.logDebug({ message: `Error: Prompt ${promptId} could not be confirmed deleted from ComfyUI history after retries.` });
+        }
+      }
+      
+    } catch (err) {
+      if (window.api && typeof window.api.logDebug === 'function') {
+        window.api.logDebug({ message: `Failed in checkAndClearComfyHistory: ${err.message}` });
+      }
+      console.error('[ComfyUI] Failed to clear history:', err);
+    } finally {
+      savedPromptIds.delete(promptId);
+      completedPromptIds.delete(promptId);
+    }
+  }
+}
+
 // Initialize DOM elements
 document.addEventListener('DOMContentLoaded', () => {
   initTabs();
   initConnection();
   initWorkflowLoader();
+  initImportPrompt();
   initWebUiWorkflowLoader();
   initGeneration();
   initOutputSettings();
   initCompareFeature();
+  initConnectionModal();
+  initFacefusionTab();
+  initAutomationSettings();
 });
 
 // Helper: Generate UUID for ComfyUI client identification
@@ -231,20 +356,67 @@ function updateConnectionStatus(state, label) {
   statusDot.className = `status-dot ${state}`;
   statusText.textContent = label;
   
-  const btnGenerate = document.getElementById('btn-generate');
+  const btnRun = document.getElementById('btn-run');
+  const btnStop = document.getElementById('btn-stop');
   if (state === 'connected' && currentWorkflow) {
-    btnGenerate.classList.remove('btn-disabled');
-    btnGenerate.disabled = false;
+    if (btnRun) {
+      btnRun.classList.remove('btn-disabled');
+      btnRun.disabled = false;
+    }
+    // Refresh model loader options when connected
+    refreshLoaderChoices();
   } else {
-    btnGenerate.classList.add('btn-disabled');
-    btnGenerate.disabled = true;
-    if (state === 'disconnected') {
-      btnGenerate.innerHTML = `
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-        <span>Generate Image</span>
-      `;
-      btnGenerate.classList.remove('btn-danger');
-      btnGenerate.classList.add('btn-primary');
+    if (btnRun) {
+      btnRun.classList.add('btn-disabled');
+      btnRun.disabled = true;
+    }
+    if (btnStop) {
+      btnStop.classList.add('btn-disabled');
+      btnStop.disabled = true;
+    }
+  }
+
+  // Handle connection modal state
+  const errorMsg = document.getElementById('modal-error-msg');
+  if (state === 'connected') {
+    if (isStartupCheckActive) {
+      isStartupCheckActive = false;
+    }
+    if (isRetryingConnection) {
+      isRetryingConnection = false;
+      const btnConfigure = document.getElementById('btn-modal-configure');
+      const btnRetry = document.getElementById('btn-modal-retry');
+      if (btnRetry) {
+        btnRetry.textContent = 'Retry Connection';
+        btnRetry.disabled = false;
+      }
+      if (btnConfigure) btnConfigure.disabled = false;
+    }
+    if (errorMsg) {
+      errorMsg.textContent = '';
+      errorMsg.classList.add('hidden');
+    }
+    hideConnectionModal();
+  } else if (state === 'disconnected') {
+    if (isStartupCheckActive) {
+      isStartupCheckActive = false;
+      showConnectionModal();
+      switchToTab('tab-service');
+    }
+    if (isRetryingConnection) {
+      isRetryingConnection = false;
+      const btnConfigure = document.getElementById('btn-modal-configure');
+      const btnRetry = document.getElementById('btn-modal-retry');
+      if (btnRetry) {
+        btnRetry.textContent = 'Retry Connection';
+        btnRetry.disabled = false;
+      }
+      if (btnConfigure) btnConfigure.disabled = false;
+      
+      if (errorMsg) {
+        errorMsg.textContent = `Retry failed: ${label || 'Could not connect'}`;
+        errorMsg.classList.remove('hidden');
+      }
     }
   }
 }
@@ -313,7 +485,14 @@ function setupWebSocket(wsUrl) {
 }
 
 async function checkQueueStatus() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const btnStop = document.getElementById('btn-stop');
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    if (btnStop) {
+      btnStop.classList.add('btn-disabled');
+      btnStop.disabled = true;
+    }
+    return;
+  }
   
   try {
     const response = await comfyFetch(`/queue`);
@@ -321,6 +500,16 @@ async function checkQueueStatus() {
     const running = data.queue_running.length;
     const pending = data.queue_pending.length;
     document.getElementById('queue-status').textContent = `Running: ${running} / Pending: ${pending}`;
+    
+    if (btnStop) {
+      if (running > 0 || pending > 0 || activePromptId) {
+        btnStop.classList.remove('btn-disabled');
+        btnStop.disabled = false;
+      } else {
+        btnStop.classList.add('btn-disabled');
+        btnStop.disabled = true;
+      }
+    }
   } catch (err) {
     document.getElementById('queue-status').textContent = 'Fetch Failed';
   }
@@ -336,7 +525,15 @@ function initWorkflowLoader() {
     btnLoad.addEventListener('click', async () => {
       try {
         const fileData = await window.api.selectWorkflowFile();
-        if (fileData) loadWorkflow(fileData.content, fileData.fileName);
+        if (fileData) {
+          loadWorkflow(fileData.content, fileData.fileName, true);
+          if (fileData.sister) {
+            if (fileData.sister.content.nodes && Array.isArray(fileData.sister.content.nodes)) {
+              applyWebUiWorkflow(fileData.sister.content, fileData.sister.fileName);
+              showToast('Auto-linked Web UI Workflow', `System automatically found and loaded the related Web UI version: ${fileData.sister.fileName}`, 'success');
+            }
+          }
+        }
       } catch (err) {
         alert(err.message);
       }
@@ -374,9 +571,16 @@ function initWorkflowLoader() {
       const sidebarBadge = document.getElementById('sidebar-params-badge');
       if (sidebarBadge) { sidebarBadge.style.display = 'none'; sidebarBadge.textContent = '0'; }
 
-      const btnGenerate = document.getElementById('btn-generate');
-      btnGenerate.classList.add('btn-disabled');
-      btnGenerate.disabled = true;
+      const btnRun = document.getElementById('btn-run');
+      if (btnRun) {
+        btnRun.classList.add('btn-disabled');
+        btnRun.disabled = true;
+      }
+      const btnStop = document.getElementById('btn-stop');
+      if (btnStop) {
+        btnStop.classList.add('btn-disabled');
+        btnStop.disabled = true;
+      }
 
       // Reset compare mode and update button state
       toggleCompareMode(false);
@@ -414,7 +618,7 @@ function saveWorkflowToLocalStorage() {
       }
     });
 
-    // Also persist image slot rotation values back into the workflow JSON
+    // Also persist image slot rotation and flip values back into the workflow JSON
     imageSlots.forEach(slotState => {
       if (!slotState.nodeId) return;
       // Persist image filename
@@ -424,7 +628,15 @@ function saveWorkflowToLocalStorage() {
       }
       // Persist rotation value
       if (slotState.rotateNodeId && currentWorkflow[slotState.rotateNodeId]) {
-        currentWorkflow[slotState.rotateNodeId].inputs.rotation = slotState.rotation;
+        currentWorkflow[slotState.rotateNodeId].inputs.rotation = mapUiRotationToComfy(slotState.rotation);
+      }
+      // Persist flip value
+      if (slotState.flipNodeId && currentWorkflow[slotState.flipNodeId]) {
+        if (slotState.flip === 'horizontal') {
+          currentWorkflow[slotState.flipNodeId].inputs.flip_method = "y-axis: horizontally";
+        } else if (slotState.flip === 'vertical') {
+          currentWorkflow[slotState.flipNodeId].inputs.flip_method = "x-axis: vertically";
+        }
       }
     });
 
@@ -434,7 +646,269 @@ function saveWorkflowToLocalStorage() {
 }
 
 
-function loadWorkflow(workflowJson, filename) {
+function captureCurrentSettings() {
+  const settings = {
+    clipPositive: [],
+    clipNegative: [],
+    qwenPositive: [],
+    qwenNegative: [],
+    imageSlots: []
+  };
+
+  if (!currentWorkflow) return settings;
+
+  // 1. Capture prompts from paramMappings and DOM
+  paramMappings.forEach(mapping => {
+    const inputEl = document.getElementById(mapping.elementId);
+    if (!inputEl) return;
+
+    const value = inputEl.value;
+    const parentItem = inputEl.closest('.param-item');
+    if (!parentItem) return;
+
+    const nameEl = parentItem.querySelector('.param-name');
+    const labelText = nameEl ? nameEl.textContent : '';
+
+    const node = currentWorkflow[mapping.nodeId];
+    if (!node) return;
+    const isClip = mapping.key === 'text' && node.class_type === 'CLIPTextEncode';
+    const isQwen = mapping.key === 'prompt' && node.class_type === 'TextEncodeQwenImageEditPlus';
+
+    if (isClip) {
+      if (labelText.toLowerCase().includes('negative')) {
+        settings.clipNegative.push(value);
+      } else {
+        settings.clipPositive.push(value);
+      }
+    } else if (isQwen) {
+      if (labelText.toLowerCase().includes('negative')) {
+        settings.qwenNegative.push(value);
+      } else {
+        settings.qwenPositive.push(value);
+      }
+    }
+  });
+
+  // 2. Capture image slot settings
+  imageSlots.forEach((slot) => {
+    settings.imageSlots.push({
+      imageFilename: slot.imageFilename,
+      enabled: slot.enabled,
+      rotation: slot.rotation,
+      flip: slot.flip
+    });
+  });
+
+  return settings;
+}
+
+function applyPreservedSettings(workflow, settings) {
+  if (!settings) return;
+
+  // 1. Pre-scan for positive/negative nodes (just like generateDynamicParamsUI)
+  const knownPositiveNodes = new Set();
+  const knownNegativeNodes = new Set();
+
+  const traceConditioning = (startNodeId, visited = new Set()) => {
+    if (!startNodeId || visited.has(startNodeId)) return [];
+    visited.add(startNodeId);
+    const node = workflow[startNodeId];
+    if (!node) return [];
+    const classType = node.class_type || '';
+    if (classType === 'CLIPTextEncode' || classType === 'TextEncodeQwenImageEditPlus') {
+      return [startNodeId];
+    }
+    let found = [];
+    if (node.inputs) {
+      for (const key in node.inputs) {
+        const val = node.inputs[key];
+        if (Array.isArray(val) && val.length === 2 && typeof val[0] === 'string') {
+          const kLower = key.toLowerCase();
+          if (kLower.includes('conditioning') || 
+              kLower.includes('positive') || 
+              kLower.includes('negative') ||
+              kLower.includes('prompt')) {
+            found = found.concat(traceConditioning(String(val[0]), visited));
+          }
+        }
+      }
+    }
+    return found;
+  };
+
+  for (const nodeId in workflow) {
+    const node = workflow[nodeId];
+    if (!node || !node.inputs) continue;
+    const classType = node.class_type || '';
+    const isSampler = classType.includes('Sampler') || classType === 'KSampler' || classType === 'KSamplerAdvanced';
+    if (isSampler) {
+      if (node.inputs.positive && Array.isArray(node.inputs.positive) && node.inputs.positive.length === 2) {
+        const posNodes = traceConditioning(String(node.inputs.positive[0]));
+        posNodes.forEach(id => knownPositiveNodes.add(id));
+      }
+      if (node.inputs.negative && Array.isArray(node.inputs.negative) && node.inputs.negative.length === 2) {
+        const negNodes = traceConditioning(String(node.inputs.negative[0]));
+        negNodes.forEach(id => knownNegativeNodes.add(id));
+      }
+    }
+  }
+
+  // Count prompt slots encountered in the new workflow so we can map them index-by-index
+  let clipPositiveIdx = 0;
+  let clipNegativeIdx = 0;
+  let qwenPositiveIdx = 0;
+  let qwenNegativeIdx = 0;
+
+  // 2. Iterate through all nodes in the workflow JSON and update prompt values
+  for (const nodeId in workflow) {
+    const node = workflow[nodeId];
+    if (!node || !node.inputs) continue;
+    
+    const classType = node.class_type || '';
+    const nodeTitle = (node._meta && node._meta.title) ? node._meta.title : `${classType} (#${nodeId})`;
+
+    if (classType === 'CLIPTextEncode' && typeof node.inputs.text === 'string') {
+      let isNegative = false;
+      if (knownNegativeNodes.has(nodeId)) {
+        isNegative = true;
+      } else if (knownPositiveNodes.has(nodeId)) {
+        isNegative = false;
+      } else {
+        const val = node.inputs.text;
+        isNegative = val.toLowerCase().includes('bad') || 
+                     val.toLowerCase().includes('ugly') || 
+                     val.toLowerCase().includes('nsfw') || 
+                     nodeTitle.toLowerCase().includes('negative');
+      }
+
+      if (isNegative) {
+        if (clipNegativeIdx < settings.clipNegative.length) {
+          node.inputs.text = settings.clipNegative[clipNegativeIdx];
+        }
+        clipNegativeIdx++;
+      } else {
+        if (clipPositiveIdx < settings.clipPositive.length) {
+          node.inputs.text = settings.clipPositive[clipPositiveIdx];
+        }
+        clipPositiveIdx++;
+      }
+    } else if (classType === 'TextEncodeQwenImageEditPlus' && typeof node.inputs.prompt === 'string') {
+      let isNegative = false;
+      if (knownNegativeNodes.has(nodeId)) {
+        isNegative = true;
+      } else if (knownPositiveNodes.has(nodeId)) {
+        isNegative = false;
+      } else {
+        const val = node.inputs.prompt;
+        const lowerTitle = nodeTitle.toLowerCase();
+        if (lowerTitle.includes('negative') || lowerTitle.includes('neg')) {
+          isNegative = true;
+        } else if (lowerTitle.includes('positive') || lowerTitle.includes('postive') || lowerTitle.includes('pos')) {
+          isNegative = false;
+        } else {
+          isNegative = val.trim() === '';
+        }
+      }
+
+      if (isNegative) {
+        if (qwenNegativeIdx < settings.qwenNegative.length) {
+          node.inputs.prompt = settings.qwenNegative[qwenNegativeIdx];
+        }
+        qwenNegativeIdx++;
+      } else {
+        if (qwenPositiveIdx < settings.qwenPositive.length) {
+          node.inputs.prompt = settings.qwenPositive[qwenPositiveIdx];
+        }
+        qwenPositiveIdx++;
+      }
+    }
+  }
+
+  // 3. Update image slots in the new workflow
+  const loadImageNodes = {};
+  const rotateNodeForLoad = {};
+  const flipNodeForLoad = {};
+
+  for (const nodeId in workflow) {
+    const node = workflow[nodeId];
+    if (!node || !node.inputs) continue;
+    if (node.class_type === 'LoadImage') {
+      loadImageNodes[nodeId] = node;
+    }
+  }
+
+  const loadIds = Object.keys(loadImageNodes);
+  loadIds.sort((a, b) => parseInt(a) - parseInt(b));
+
+  for (const loadId of loadIds) {
+    for (const nodeId in workflow) {
+      const node = workflow[nodeId];
+      if (!node || !node.inputs) continue;
+      const imgInput = node.inputs.image;
+      if (Array.isArray(imgInput) && String(imgInput[0]) === loadId) {
+        if (node.class_type === 'ImageRotate') {
+          rotateNodeForLoad[loadId] = nodeId;
+        } else if (node.class_type === 'ImageFlip') {
+          flipNodeForLoad[loadId] = nodeId;
+        }
+      }
+    }
+    const rotateId = rotateNodeForLoad[loadId];
+    if (rotateId) {
+      for (const nodeId in workflow) {
+        const node = workflow[nodeId];
+        if (!node || !node.inputs) continue;
+        const imgInput = node.inputs.image;
+        if (Array.isArray(imgInput) && String(imgInput[0]) === rotateId && node.class_type === 'ImageFlip') {
+          flipNodeForLoad[loadId] = nodeId;
+        }
+      }
+    }
+    const flipId = flipNodeForLoad[loadId];
+    if (flipId) {
+      for (const nodeId in workflow) {
+        const node = workflow[nodeId];
+        if (!node || !node.inputs) continue;
+        const imgInput = node.inputs.image;
+        if (Array.isArray(imgInput) && String(imgInput[0]) === flipId && node.class_type === 'ImageRotate') {
+          rotateNodeForLoad[loadId] = nodeId;
+        }
+      }
+    }
+  }
+
+  loadIds.forEach((loadId, slotIndex) => {
+    if (slotIndex < settings.imageSlots.length) {
+      const preservedSlot = settings.imageSlots[slotIndex];
+
+      if (preservedSlot.imageFilename) {
+        workflow[loadId].inputs.image = preservedSlot.imageFilename;
+      }
+
+      const rotateId = rotateNodeForLoad[loadId];
+      if (rotateId && preservedSlot.rotation) {
+        workflow[rotateId].inputs.rotation = mapUiRotationToComfy(preservedSlot.rotation);
+      }
+
+      const flipId = flipNodeForLoad[loadId];
+      if (flipId && preservedSlot.flip) {
+        if (preservedSlot.flip === 'horizontal') {
+          workflow[flipId].inputs.flip_method = "y-axis: horizontally";
+        } else if (preservedSlot.flip === 'vertical') {
+          workflow[flipId].inputs.flip_method = "x-axis: vertically";
+        } else {
+          workflow[flipId].inputs.flip_method = "none";
+        }
+      }
+
+      localStorage.setItem(`img_slot_${slotIndex}_enabled`, String(preservedSlot.enabled));
+      localStorage.setItem(`img_slot_${slotIndex}_flip`, preservedSlot.flip);
+    }
+  });
+}
+
+
+function loadWorkflow(workflowJson, filename, preserveExisting = false) {
   // ComfyUI workflows can be in API format or standard UI format.
   // Standard UI format has 'templates' / 'nodes'. API format has direct numerical keys.
   // The API uses the direct numerical keys version (API Format). We look for that.
@@ -453,6 +927,11 @@ function loadWorkflow(workflowJson, filename) {
     return;
   }
 
+  if (preserveExisting) {
+    const settings = captureCurrentSettings();
+    applyPreservedSettings(workflowJson, settings);
+  }
+
   currentWorkflow = workflowJson;
   currentWorkflowFilename = filename;
 
@@ -469,15 +948,44 @@ function loadWorkflow(workflowJson, filename) {
   // Parse parameters dynamically
   generateDynamicParamsUI(workflowJson);
 
-  // Enable Generate button if connected
+  // Enable Run button if connected
   const statusDot = document.getElementById('status-dot');
   if (statusDot.classList.contains('connected')) {
-    const btnGenerate = document.getElementById('btn-generate');
-    btnGenerate.classList.remove('btn-disabled');
-    btnGenerate.disabled = false;
+    const btnRun = document.getElementById('btn-run');
+    if (btnRun) {
+      btnRun.classList.remove('btn-disabled');
+      btnRun.disabled = false;
+    }
   }
   updateCompareButtonState();
 }
+
+// Helper: validate, store and display a Web UI format JSON
+function applyWebUiWorkflow(json, fileName) {
+  if (!json.nodes || !Array.isArray(json.nodes)) {
+    showToast('Wrong Format',
+      'This is an API format file. Use the API Format row below to load it.',
+      'error');
+    return;
+  }
+  webUiWorkflow = json;
+  localStorage.setItem('comfyui_webui_workflow_json', JSON.stringify(json));
+  localStorage.setItem('comfyui_webui_workflow_filename', fileName);
+
+  const nameEl = document.getElementById('webui-workflow-filename');
+  if (nameEl) {
+    nameEl.value = fileName;
+    nameEl.classList.add('loaded');
+  }
+
+  const btnClear = document.getElementById('btn-clear-webui-workflow');
+  if (btnClear) {
+    btnClear.disabled = false;
+  }
+
+  showToast('Web UI Workflow Loaded', `${fileName} — layout will be embedded in saved PNGs`, 'success');
+}
+
 
 // Generate UI elements dynamically from nodes in workflow JSON
 function generateDynamicParamsUI(workflow) {
@@ -491,16 +999,189 @@ function generateDynamicParamsUI(workflow) {
   if (imagesContainer) {
     imagesContainer.innerHTML = '';
   }
+  
+  const loadersContainer = document.getElementById('loaders-params-container');
+  if (loadersContainer) loadersContainer.innerHTML = '';
+  const qwenCanvasContainer = document.getElementById('qwen-canvas-params-container');
+  if (qwenCanvasContainer) qwenCanvasContainer.innerHTML = '';
+
+  const loadersPanel = document.getElementById('loaders-panel');
+  if (loadersPanel) loadersPanel.classList.add('hidden');
+  const qwenCanvasPanel = document.getElementById('qwen-canvas-panel');
+  if (qwenCanvasPanel) qwenCanvasPanel.classList.add('hidden');
+
   paramMappings = [];
   imageSlots = [];
   
   let paramCount = 0;
   let qwenCount = 0;
 
-  // --- Pre-scan: build a map of LoadImage nodes and their associated ImageRotate nodes ---
-  // For each LoadImage node, find ImageRotate nodes whose `image` input links to it.
+  // --- Pre-scan: Find Loader nodes ---
+  const loaderNodes = [];
+  for (const nodeId in workflow) {
+    const node = workflow[nodeId];
+    if (!node || !node.inputs) continue;
+    const classType = node.class_type || '';
+    if (classType === 'UnetLoaderGGUF' || classType === 'CLIPLoader' || classType === 'CLIPLoaderGGUF' || classType === 'VAELoader') {
+      loaderNodes.push({ id: nodeId, node: node, classType });
+    }
+  }
+
+  if (loaderNodes.length > 0) {
+    if (loadersPanel) loadersPanel.classList.remove('hidden');
+
+    const classOrder = {
+      'UnetLoaderGGUF': 1,
+      'CLIPLoaderGGUF': 2,
+      'CLIPLoader': 3,
+      'VAELoader': 4
+    };
+    loaderNodes.sort((a, b) => {
+      return (classOrder[a.classType] || 99) - (classOrder[b.classType] || 99);
+    });
+
+    loaderNodes.forEach(item => {
+      const nodeId = item.id;
+      const node = item.node;
+      const classType = item.classType;
+
+      let key = null;
+      let label = '';
+      if (classType === 'UnetLoaderGGUF') {
+        key = 'unet_name';
+        label = 'UNET Model (GGUF)';
+      } else if (classType === 'CLIPLoader' || classType === 'CLIPLoaderGGUF') {
+        key = 'clip_name';
+        label = 'CLIP Model';
+      } else if (classType === 'VAELoader') {
+        key = 'vae_name';
+        label = 'VAE Model';
+      }
+
+      if (key && node.inputs[key] !== undefined) {
+        paramCount++;
+        const paramId = `param-${nodeId}-${key}`;
+        const defaultValue = node.inputs[key];
+
+        const paramEl = createParamElement(paramId, label, nodeId, key, 'select', defaultValue, 1, 3, [defaultValue]);
+        if (loadersContainer) {
+          loadersContainer.appendChild(paramEl);
+        }
+
+        paramMappings.push({
+          nodeId: nodeId,
+          key: key,
+          elementId: paramId,
+          type: 'string'
+        });
+
+        // Load dynamic choices from ComfyUI object info
+        populateLoaderChoices(classType, key, paramId, defaultValue);
+      }
+    });
+  }
+
+  // --- Pre-scan: Find QwenCanvasPlus nodes ---
+  let hasQwenCanvas = false;
+  for (const nodeId in workflow) {
+    const node = workflow[nodeId];
+    if (!node || !node.inputs) continue;
+    if (node.class_type === 'QwenCanvasPlus') {
+      hasQwenCanvas = true;
+
+      // We want to render its inputs: aspect_ratio, vae_encode, scaling_strategy, batch_size
+      const inputsToRender = [
+        { key: 'aspect_ratio', label: 'Aspect Ratio', type: 'select' },
+        { key: 'vae_encode', label: 'VAE Encode', type: 'select' },
+        { key: 'scaling_strategy', label: 'Scaling Strategy', type: 'select' },
+        { key: 'batch_size', label: 'Batch Size', type: 'number', step: 1 }
+      ];
+
+      inputsToRender.forEach(inp => {
+        const val = node.inputs[inp.key];
+        if (val !== undefined) {
+          paramCount++;
+          const paramId = `param-${nodeId}-${inp.key}`;
+
+          let paramEl;
+          if (inp.type === 'select') {
+            paramEl = createParamElement(paramId, inp.label, nodeId, inp.key, 'select', val, 1, 3, [val]);
+            populateLoaderChoices('QwenCanvasPlus', inp.key, paramId, val);
+          } else {
+            paramEl = createParamElement(paramId, inp.label, nodeId, inp.key, 'number', val, inp.step || 1);
+          }
+
+          if (qwenCanvasContainer) {
+            qwenCanvasContainer.appendChild(paramEl);
+          }
+
+          paramMappings.push({
+            nodeId: nodeId,
+            key: inp.key,
+            elementId: paramId,
+            type: inp.type === 'number' ? 'number' : 'string'
+          });
+        }
+      });
+    }
+  }
+
+  if (hasQwenCanvas && qwenCanvasPanel) {
+    qwenCanvasPanel.classList.remove('hidden');
+  }
+
+  // --- Pre-scan: Identify positive/negative prompt nodes from sampler inputs ---
+  const knownPositiveNodes = new Set();
+  const knownNegativeNodes = new Set();
+
+  const traceConditioning = (startNodeId, visited = new Set()) => {
+    if (!startNodeId || visited.has(startNodeId)) return [];
+    visited.add(startNodeId);
+    const node = workflow[startNodeId];
+    if (!node) return [];
+    const classType = node.class_type || '';
+    if (classType === 'CLIPTextEncode' || classType === 'TextEncodeQwenImageEditPlus') {
+      return [startNodeId];
+    }
+    let found = [];
+    if (node.inputs) {
+      for (const key in node.inputs) {
+        const val = node.inputs[key];
+        if (Array.isArray(val) && val.length === 2 && typeof val[0] === 'string') {
+          const kLower = key.toLowerCase();
+          if (kLower.includes('conditioning') || 
+              kLower.includes('positive') || 
+              kLower.includes('negative') ||
+              kLower.includes('prompt')) {
+            found = found.concat(traceConditioning(String(val[0]), visited));
+          }
+        }
+      }
+    }
+    return found;
+  };
+
+  for (const nodeId in workflow) {
+    const node = workflow[nodeId];
+    if (!node || !node.inputs) continue;
+    const classType = node.class_type || '';
+    const isSampler = classType.includes('Sampler') || classType === 'KSampler' || classType === 'KSamplerAdvanced';
+    if (isSampler) {
+      if (node.inputs.positive && Array.isArray(node.inputs.positive) && node.inputs.positive.length === 2) {
+        const posNodes = traceConditioning(String(node.inputs.positive[0]));
+        posNodes.forEach(id => knownPositiveNodes.add(id));
+      }
+      if (node.inputs.negative && Array.isArray(node.inputs.negative) && node.inputs.negative.length === 2) {
+        const negNodes = traceConditioning(String(node.inputs.negative[0]));
+        negNodes.forEach(id => knownNegativeNodes.add(id));
+      }
+    }
+  }
+
+  // --- Pre-scan: build maps of LoadImage nodes and their associated ImageRotate and ImageFlip nodes ---
   const loadImageNodes = {}; // nodeId -> node
   const rotateNodeForLoad = {}; // loadImageNodeId -> rotateNodeId
+  const flipNodeForLoad = {};   // loadImageNodeId -> flipNodeId
 
   for (const nodeId in workflow) {
     const node = workflow[nodeId];
@@ -510,16 +1191,44 @@ function generateDynamicParamsUI(workflow) {
     }
   }
 
-  // Find ImageRotate nodes directly connected to each LoadImage
-  for (const nodeId in workflow) {
-    const node = workflow[nodeId];
-    if (!node || !node.inputs) continue;
-    if (node.class_type === 'ImageRotate') {
+  // Trace to find associated ImageRotate and ImageFlip nodes for each LoadImage (direct and chained)
+  for (const loadId in loadImageNodes) {
+    // 1. Direct connections from LoadImage
+    for (const nodeId in workflow) {
+      const node = workflow[nodeId];
+      if (!node || !node.inputs) continue;
       const imgInput = node.inputs.image;
-      if (Array.isArray(imgInput) && loadImageNodes[String(imgInput[0])]) {
-        const loadId = String(imgInput[0]);
-        // Only assign first found rotate node per LoadImage
-        if (!rotateNodeForLoad[loadId]) {
+      if (Array.isArray(imgInput) && String(imgInput[0]) === loadId) {
+        if (node.class_type === 'ImageRotate') {
+          rotateNodeForLoad[loadId] = nodeId;
+        } else if (node.class_type === 'ImageFlip') {
+          flipNodeForLoad[loadId] = nodeId;
+        }
+      }
+    }
+
+    // 2. Indirect connections (chained)
+    // If we found a rotate node, look for a flip node connected to it
+    const rotateId = rotateNodeForLoad[loadId];
+    if (rotateId) {
+      for (const nodeId in workflow) {
+        const node = workflow[nodeId];
+        if (!node || !node.inputs) continue;
+        const imgInput = node.inputs.image;
+        if (Array.isArray(imgInput) && String(imgInput[0]) === rotateId && node.class_type === 'ImageFlip') {
+          flipNodeForLoad[loadId] = nodeId;
+        }
+      }
+    }
+
+    // If we found a flip node, look for a rotate node connected to it
+    const flipId = flipNodeForLoad[loadId];
+    if (flipId) {
+      for (const nodeId in workflow) {
+        const node = workflow[nodeId];
+        if (!node || !node.inputs) continue;
+        const imgInput = node.inputs.image;
+        if (Array.isArray(imgInput) && String(imgInput[0]) === flipId && node.class_type === 'ImageRotate') {
           rotateNodeForLoad[loadId] = nodeId;
         }
       }
@@ -579,10 +1288,17 @@ function generateDynamicParamsUI(workflow) {
         const val = node.inputs.text;
         
         // Guess if it's Positive or Negative prompt
-        const isNegative = val.toLowerCase().includes('bad') || 
-                           val.toLowerCase().includes('ugly') || 
-                           val.toLowerCase().includes('nsfw') || 
-                           nodeTitle.toLowerCase().includes('negative');
+        let isNegative = false;
+        if (knownNegativeNodes.has(nodeId)) {
+          isNegative = true;
+        } else if (knownPositiveNodes.has(nodeId)) {
+          isNegative = false;
+        } else {
+          isNegative = val.toLowerCase().includes('bad') || 
+                       val.toLowerCase().includes('ugly') || 
+                       val.toLowerCase().includes('nsfw') || 
+                       nodeTitle.toLowerCase().includes('negative');
+        }
         
         const label = isNegative ? `Negative Prompt (${nodeTitle})` : `Positive Prompt (${nodeTitle})`;
         
@@ -606,15 +1322,21 @@ function generateDynamicParamsUI(workflow) {
         qwenCount++;
         const val = node.inputs.prompt;
 
-        // Identify Positive vs Negative based on node title (prioritized)
+        // Identify Positive vs Negative based on tracing or node title / value content
         let isNegative = false;
-        const lowerTitle = nodeTitle.toLowerCase();
-        if (lowerTitle.includes('negative') || lowerTitle.includes('neg')) {
+        if (knownNegativeNodes.has(nodeId)) {
           isNegative = true;
-        } else if (lowerTitle.includes('positive') || lowerTitle.includes('postive') || lowerTitle.includes('pos')) {
+        } else if (knownPositiveNodes.has(nodeId)) {
           isNegative = false;
         } else {
-          isNegative = val.trim() === '';
+          const lowerTitle = nodeTitle.toLowerCase();
+          if (lowerTitle.includes('negative') || lowerTitle.includes('neg')) {
+            isNegative = true;
+          } else if (lowerTitle.includes('positive') || lowerTitle.includes('postive') || lowerTitle.includes('pos')) {
+            isNegative = false;
+          } else {
+            isNegative = val.trim() === '';
+          }
         }
 
         const label = isNegative
@@ -772,8 +1494,24 @@ function generateDynamicParamsUI(workflow) {
     for (let slotIndex = 0; slotIndex < MAX_SLOTS; slotIndex++) {
       const loadId = loadIds[slotIndex] || null;
       const rotateId = loadId ? (rotateNodeForLoad[loadId] || null) : null;
+      const flipId = loadId ? (flipNodeForLoad[loadId] || null) : null;
       const defaultImage = loadId ? (loadImageNodes[loadId].inputs.image || '') : '';
-      const defaultRotation = rotateId ? (workflow[rotateId].inputs.rotation || 'none') : 'none';
+      const rawRotation = rotateId ? (workflow[rotateId].inputs.rotation || 'none') : 'none';
+      const defaultRotation = mapComfyRotationToUi(rawRotation);
+
+      // Restore persisted flip state from localStorage or default to workflow setting
+      const savedFlip = localStorage.getItem(`img_slot_${slotIndex}_flip`);
+      let defaultFlip = 'none';
+      if (savedFlip !== null) {
+        defaultFlip = savedFlip;
+      } else if (flipId && workflow[flipId]) {
+        const rawFlip = workflow[flipId].inputs.flip_method || 'none';
+        if (rawFlip.includes('horizontally')) {
+          defaultFlip = 'horizontal';
+        } else if (rawFlip.includes('vertically')) {
+          defaultFlip = 'vertical';
+        }
+      }
 
       // Restore persisted enabled state from localStorage (fall back to enabled if active)
       const savedEnabled = localStorage.getItem(`img_slot_${slotIndex}_enabled`);
@@ -786,8 +1524,10 @@ function generateDynamicParamsUI(workflow) {
         slotIndex,
         nodeId: loadId,
         rotateNodeId: rotateId,
+        flipNodeId: flipId,
         enabled: restoredEnabled,
         rotation: defaultRotation,
+        flip: defaultFlip,
         imageFilename: defaultImage
       };
       imageSlots.push(slotState);
@@ -866,7 +1606,7 @@ function generateDynamicParamsUI(workflow) {
   }
 }
 
-function createParamElement(id, label, nodeId, key, inputType, defaultValue, step = 1, rows = 3) {
+function createParamElement(id, label, nodeId, key, inputType, defaultValue, step = 1, rows = 3, choices = []) {
   const item = document.createElement('div');
   item.className = 'param-item';
   
@@ -893,6 +1633,24 @@ function createParamElement(id, label, nodeId, key, inputType, defaultValue, ste
     input = document.createElement('textarea');
     input.value = defaultValue;
     input.rows = rows;
+  } else if (inputType === 'select') {
+    input = document.createElement('select');
+    choices.forEach(choice => {
+      const option = document.createElement('option');
+      option.value = choice;
+      option.textContent = choice;
+      if (choice === defaultValue) {
+        option.selected = true;
+      }
+      input.appendChild(option);
+    });
+    if (defaultValue && !choices.includes(defaultValue)) {
+      const option = document.createElement('option');
+      option.value = defaultValue;
+      option.textContent = defaultValue;
+      option.selected = true;
+      input.appendChild(option);
+    }
   } else {
     input = document.createElement('input');
     input.type = inputType;
@@ -910,6 +1668,66 @@ function createParamElement(id, label, nodeId, key, inputType, defaultValue, ste
   item.appendChild(inputGroup);
   
   return item;
+}
+
+async function populateLoaderChoices(classType, key, selectElementId, defaultValue) {
+  try {
+    const response = await comfyFetch(`/object_info/${classType}`);
+    const data = await response.json();
+    if (data && data[classType] && data[classType].input) {
+      let inputInfo = null;
+      if (data[classType].input.required && data[classType].input.required[key]) {
+        inputInfo = data[classType].input.required[key];
+      } else if (data[classType].input.optional && data[classType].input.optional[key]) {
+        inputInfo = data[classType].input.optional[key];
+      }
+      if (inputInfo && Array.isArray(inputInfo) && Array.isArray(inputInfo[0])) {
+        const choices = inputInfo[0];
+        const selectEl = document.getElementById(selectElementId);
+        if (selectEl) {
+          const currentValue = selectEl.value || defaultValue;
+          selectEl.innerHTML = '';
+          choices.forEach(choice => {
+            const option = document.createElement('option');
+            option.value = choice;
+            option.textContent = choice;
+            if (choice === currentValue) {
+              option.selected = true;
+            }
+            selectEl.appendChild(option);
+          });
+          if (currentValue && !choices.includes(currentValue)) {
+            const option = document.createElement('option');
+            option.value = currentValue;
+            option.textContent = currentValue;
+            option.selected = true;
+            selectEl.appendChild(option);
+          }
+          selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`Failed to fetch choices for ${classType}.${key}:`, err);
+  }
+}
+
+function refreshLoaderChoices() {
+  if (!currentWorkflow) return;
+  const selectElements = document.querySelectorAll('#loaders-panel select, #qwen-canvas-panel select');
+  selectElements.forEach(selectEl => {
+    const match = selectEl.id.match(/^param-(\d+)-(.+)$/);
+    if (match) {
+      const nodeId = match[1];
+      const key = match[2];
+      const node = currentWorkflow[nodeId];
+      if (node) {
+        const classType = node.class_type;
+        const defaultValue = selectEl.value;
+        populateLoaderChoices(classType, key, selectEl.id, defaultValue);
+      }
+    }
+  });
 }
 
 // Creates a styled prompt editor for TextEncodeQwenImageEditPlus nodes
@@ -989,7 +1807,7 @@ function createQwenPromptElement(id, label, nodeId, defaultValue) {
 
 // Creates an image slot element for the Input Images panel
 function createImageInputSlotElement(slotState, workflow) {
-  const { slotIndex, nodeId, rotateNodeId, enabled, rotation, imageFilename } = slotState;
+  const { slotIndex, nodeId, rotateNodeId, flipNodeId, enabled, rotation, flip, imageFilename } = slotState;
   const isActive = nodeId !== null;
   const slotNum = slotIndex + 1;
 
@@ -997,7 +1815,7 @@ function createImageInputSlotElement(slotState, workflow) {
   item.className = `param-item image-slot${!isActive || !enabled ? ' disabled-slot' : ''}`;
   item.dataset.slotIndex = slotIndex;
 
-  // Header: checkbox + label + rotate button
+  // Header: checkbox + label + rotate/flip controls
   const header = document.createElement('div');
   header.className = 'param-header';
 
@@ -1020,6 +1838,35 @@ function createImageInputSlotElement(slotState, workflow) {
   headerLeft.appendChild(checkbox);
   headerLeft.appendChild(name);
 
+  // Actions container (right side of the header)
+  const headerRight = document.createElement('div');
+  headerRight.className = 'param-header-right';
+  headerRight.style.display = 'flex';
+  headerRight.style.gap = '6px';
+  headerRight.style.alignItems = 'center';
+
+  // Flip select dropdown
+  const flipSelect = document.createElement('select');
+  flipSelect.className = 'select-flip';
+  flipSelect.title = 'Select flip method';
+  flipSelect.disabled = !isActive || !flipNodeId;
+
+  const FLIP_OPTIONS = [
+    { value: 'none', label: 'None' },
+    { value: 'horizontal', label: '⇄ y-axis: horizontally' },
+    { value: 'vertical', label: '⇅ x-axis: vertically' }
+  ];
+
+  FLIP_OPTIONS.forEach(opt => {
+    const option = document.createElement('option');
+    option.value = opt.value;
+    option.textContent = opt.label;
+    if (opt.value === flip) {
+      option.selected = true;
+    }
+    flipSelect.appendChild(option);
+  });
+
   // Rotate button (only when there is an ImageRotate node)
   const rotateBtn = document.createElement('button');
   rotateBtn.className = 'btn btn-secondary btn-small btn-rotate';
@@ -1030,8 +1877,11 @@ function createImageInputSlotElement(slotState, workflow) {
   const ROTATION_CYCLE = ['none', '90', '180', '270'];
   rotateBtn.textContent = `↻ ${ROTATION_LABELS[rotation] || '0°'}`;
 
+  headerRight.appendChild(flipSelect);
+  headerRight.appendChild(rotateBtn);
+
   header.appendChild(headerLeft);
-  header.appendChild(rotateBtn);
+  header.appendChild(headerRight);
   item.appendChild(header);
 
   // Image picker body (same style as existing createImagePickerElement)
@@ -1042,9 +1892,9 @@ function createImageInputSlotElement(slotState, workflow) {
   preview.className = 'image-picker-preview';
   preview.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>`;
 
-  // Apply current rotation to preview img (will apply after img loads too)
+  // Apply current rotation and flip to preview img (will apply after img loads too)
   const CSS_ROTATION = { none: 0, '90': 90, '180': 180, '270': 270 };
-  let currentCssRotation = CSS_ROTATION[slotState.rotation] || 0;
+  const CSS_FLIP = { none: '', horizontal: 'scaleX(-1)', vertical: 'scaleY(-1)' };
 
   const info = document.createElement('div');
   info.className = 'image-picker-info';
@@ -1089,15 +1939,17 @@ function createImageInputSlotElement(slotState, workflow) {
     nodeTag.className = 'param-node';
     nodeTag.style.marginTop = '4px';
     nodeTag.style.display = 'block';
-    nodeTag.textContent = `LoadImage: ${nodeId}${rotateNodeId ? ` · ImageRotate: ${rotateNodeId}` : ''}`;
+    nodeTag.textContent = `LoadImage: ${nodeId}${rotateNodeId ? ` · ImageRotate: ${rotateNodeId}` : ''}${flipNodeId ? ` · ImageFlip: ${flipNodeId}` : ''}`;
     item.appendChild(nodeTag);
   }
 
-  // --- Helper: apply visual rotation to preview image ---
+  // --- Helper: apply visual rotation and flip to preview image ---
   function applyRotationToPreviewImg() {
     const img = preview.querySelector('img');
     if (img) {
-      img.style.transform = `rotate(${currentCssRotation}deg)`;
+      const rot = `rotate(${CSS_ROTATION[slotState.rotation] || 0}deg)`;
+      const flipVal = CSS_FLIP[slotState.flip] || '';
+      img.style.transform = `${rot} ${flipVal}`.trim();
     }
   }
 
@@ -1110,14 +1962,24 @@ function createImageInputSlotElement(slotState, workflow) {
       item.classList.remove('disabled-slot');
       selectBtn.disabled = false;
       rotateBtn.disabled = !rotateNodeId;
+      flipSelect.disabled = !flipNodeId;
     } else {
       item.classList.add('disabled-slot');
       selectBtn.disabled = true;
       rotateBtn.disabled = true;
+      flipSelect.disabled = true;
     }
     saveWorkflowToLocalStorage();
     if (window.updateAutosavePreview) window.updateAutosavePreview();
     updateCompareButtonState();
+  });
+
+  // --- Flip dropdown change handler ---
+  flipSelect.addEventListener('change', () => {
+    slotState.flip = flipSelect.value;
+    localStorage.setItem(`img_slot_${slotState.slotIndex}_flip`, slotState.flip);
+    applyRotationToPreviewImg();
+    saveWorkflowToLocalStorage();
   });
 
   // --- Rotate button handler ---
@@ -1125,7 +1987,6 @@ function createImageInputSlotElement(slotState, workflow) {
     const curIdx = ROTATION_CYCLE.indexOf(slotState.rotation);
     const nextIdx = (curIdx + 1) % ROTATION_CYCLE.length;
     slotState.rotation = ROTATION_CYCLE[nextIdx];
-    currentCssRotation = CSS_ROTATION[slotState.rotation];
     rotateBtn.textContent = `↻ ${ROTATION_LABELS[slotState.rotation]}`;
     applyRotationToPreviewImg();
     saveWorkflowToLocalStorage();
@@ -1134,8 +1995,29 @@ function createImageInputSlotElement(slotState, workflow) {
   // --- Select image button handler ---
   selectBtn.addEventListener('click', async () => {
     try {
-      const fileData = await window.api.selectImageFile();
+      // 1. Get path for this specific slot, or fall back to global last folder
+      const slotPath = localStorage.getItem(`last_image_path_slot_${slotIndex}`) || '';
+      let defaultPath = '';
+      if (slotPath) {
+        const lastIndex = Math.max(slotPath.lastIndexOf('/'), slotPath.lastIndexOf('\\'));
+        if (lastIndex !== -1) {
+          defaultPath = slotPath.substring(0, lastIndex);
+        }
+      }
+      if (!defaultPath) {
+        defaultPath = localStorage.getItem('last_image_folder') || '';
+      }
+
+      const fileData = await window.api.selectImageFile(defaultPath);
       if (!fileData) return;
+
+      // 2. Save paths to localStorage
+      localStorage.setItem(`last_image_path_slot_${slotIndex}`, fileData.filePath);
+      const lastIndex = Math.max(fileData.filePath.lastIndexOf('/'), fileData.filePath.lastIndexOf('\\'));
+      if (lastIndex !== -1) {
+        const folder = fileData.filePath.substring(0, lastIndex);
+        localStorage.setItem('last_image_folder', folder);
+      }
 
       filenameSpan.textContent = fileData.fileName;
       filenameSpan.classList.add('selected');
@@ -1144,7 +2026,8 @@ function createImageInputSlotElement(slotState, workflow) {
       selectBtn.disabled = true;
 
       const localUrl = `file:///${fileData.filePath.replace(/\\/g, '/')}`;
-      preview.innerHTML = `<img src="${localUrl}" alt="Preview" style="transform: rotate(${currentCssRotation}deg)">`;
+      preview.innerHTML = `<img src="${localUrl}" alt="Preview">`;
+      applyRotationToPreviewImg();
 
       const uploadResult = await window.api.uploadImageToComfyUI({
         filePath: fileData.filePath,
@@ -1178,7 +2061,8 @@ function createImageInputSlotElement(slotState, workflow) {
     const previewUrl = `${comfyuiUrl}/view?filename=${encodeURIComponent(imageFilename)}&type=input`;
     window.api.comfyFetchImage({ url: previewUrl }).then(result => {
       if (result.ok) {
-        preview.innerHTML = `<img src="${result.dataUrl}" alt="Preview" style="transform: rotate(${currentCssRotation}deg)">`;
+        preview.innerHTML = `<img src="${result.dataUrl}" alt="Preview">`;
+        applyRotationToPreviewImg();
       }
     }).catch(err => console.log('Failed to fetch slot image preview', err));
   }
@@ -1249,8 +2133,29 @@ function createImagePickerElement(id, label, nodeId, defaultValue) {
   
   selectBtn.addEventListener('click', async () => {
     try {
-      const fileData = await window.api.selectImageFile();
+      // 1. Get path for this specific picker ID, or fall back to global last folder
+      const pickerPath = localStorage.getItem(`last_image_path_picker_${id}`) || '';
+      let defaultPath = '';
+      if (pickerPath) {
+        const lastIndex = Math.max(pickerPath.lastIndexOf('/'), pickerPath.lastIndexOf('\\'));
+        if (lastIndex !== -1) {
+          defaultPath = pickerPath.substring(0, lastIndex);
+        }
+      }
+      if (!defaultPath) {
+        defaultPath = localStorage.getItem('last_image_folder') || '';
+      }
+
+      const fileData = await window.api.selectImageFile(defaultPath);
       if (!fileData) return;
+
+      // 2. Save paths to localStorage
+      localStorage.setItem(`last_image_path_picker_${id}`, fileData.filePath);
+      const lastIndex = Math.max(fileData.filePath.lastIndexOf('/'), fileData.filePath.lastIndexOf('\\'));
+      if (lastIndex !== -1) {
+        const folder = fileData.filePath.substring(0, lastIndex);
+        localStorage.setItem('last_image_folder', folder);
+      }
       
       filename.textContent = fileData.fileName;
       filename.classList.add('selected');
@@ -1314,10 +2219,12 @@ function refreshImagePreviews() {
 
     const CSS_ROTATION = { none: 0, '90': 90, '180': 180, '270': 270 };
     const currentCssRotation = CSS_ROTATION[slotState.rotation] || 0;
+    const CSS_FLIP = { none: '', horizontal: 'scaleX(-1)', vertical: 'scaleY(-1)' };
+    const currentCssFlip = CSS_FLIP[slotState.flip] || '';
     const previewUrl = `${comfyuiUrl}/view?filename=${encodeURIComponent(slotState.imageFilename)}&type=input`;
     window.api.comfyFetchImage({ url: previewUrl }).then(result => {
       if (result.ok) {
-        preview.innerHTML = `<img src="${result.dataUrl}" alt="Preview" style="transform: rotate(${currentCssRotation}deg)">`;
+        preview.innerHTML = `<img src="${result.dataUrl}" alt="Preview" style="transform: rotate(${currentCssRotation}deg) ${currentCssFlip}">`;
       }
     }).catch(err => console.log('Failed to refresh slot image preview:', err));
   });
@@ -1432,6 +2339,22 @@ function isDownstreamOfSampler(nodeId, workflow, visited = new Set()) {
   return false;
 }
 
+// Helper: Count sampler nodes in the workflow JSON
+function countSamplerNodes(workflow) {
+  let count = 0;
+  if (!workflow) return count;
+  for (const nodeId in workflow) {
+    const node = workflow[nodeId];
+    if (node) {
+      const classType = node.class_type || '';
+      if (classType.includes('Sampler') || classType === 'KSampler' || classType === 'KSamplerAdvanced') {
+        count++;
+      }
+    }
+  }
+  return count;
+}
+
 // Handle binary WebSocket message containing image previews from ComfyUI
 //
 // eventType=1 (PREVIEW_IMAGE) layout:
@@ -1540,11 +2463,14 @@ function handleWebSocketMessage(data) {
 
     case 'execution_start': {
       const incomingId = data.data.prompt_id;
-      // If POST already returned, activePromptId is set; otherwise fall back to pendingPromptId.
-      if (incomingId === activePromptId ||
+      // Bind if it's a prompt submitted by this client (via myQueuedPromptIds), 
+      // or if it matches activePromptId, or is the immediately pending prompt.
+      if (myQueuedPromptIds.has(incomingId) ||
+          incomingId === activePromptId ||
           (activePromptId === null && pendingPromptId === true)) {
         // Bind the real prompt_id as early as possible so subsequent events match
         activePromptId = incomingId;
+        myQueuedPromptIds.delete(incomingId);
         pendingPromptId = false;
         window.api.logDebug({ message: `execution_start: bound activePromptId=${activePromptId}` });
         
@@ -1554,12 +2480,14 @@ function handleWebSocketMessage(data) {
         lastSamplerStep = 0;
         totalWorkflowSteps = 0;
         samplerNodeMaxMap = {};
+        estimatedSamplerCount = promptSamplerCountsMap[incomingId] || countSamplerNodes(currentWorkflow);
         
         // Reset save state for new generation
         savedForPromptId = null;
         promptSavedPath = null;
 
         updateProgress(0, 0, 'Executing workflow...');
+        startJobTimer();
         document.getElementById('display-empty').classList.add('hidden');
         document.getElementById('display-loading').classList.remove('hidden');
         document.getElementById('display-image-container').classList.add('hidden');
@@ -1586,8 +2514,16 @@ function handleWebSocketMessage(data) {
         document.getElementById('current-node').textContent = 'Execution Complete';
         document.getElementById('display-loading').classList.add('hidden');
 
+        const finishedPromptId = activePromptId;
         activePromptId = null;
         // Do NOT reset promptSavedPath and savedForPromptId here so that the "Open in Viewer" button continues to open the saved file path of the completed run
+
+        // Mark execution as complete for this prompt and check if we can clear job history
+        if (finishedPromptId) {
+          completedPromptIds.add(finishedPromptId);
+          checkAndClearComfyHistory(finishedPromptId);
+          delete promptSamplerCountsMap[finishedPromptId];
+        }
         
         // Reset all progress tracking variables
         currentExecutionSteps = 0;
@@ -1597,16 +2533,7 @@ function handleWebSocketMessage(data) {
         samplerNodeMaxMap = {};
 
         updateProgress(0, 0, 'Ready');
-
-        const btnGenerate = document.getElementById('btn-generate');
-        btnGenerate.innerHTML = `
-          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-          <span>Generate Image</span>
-        `;
-        btnGenerate.disabled = false;
-        btnGenerate.classList.remove('btn-disabled');
-        btnGenerate.classList.remove('btn-danger');
-        btnGenerate.classList.add('btn-primary');
+        stopJobTimer();
         checkQueueStatus();
       }
       break;
@@ -1716,6 +2643,9 @@ function handleWebSocketMessage(data) {
 
       showToast('Execution Stopped', 'The image generation was stopped.', 'warning');
 
+      if (activePromptId) {
+        delete promptSamplerCountsMap[activePromptId];
+      }
       activePromptId = null;
       pendingPromptId = false;
       savedForPromptId = null; promptSavedPath = null;
@@ -1727,16 +2657,7 @@ function handleWebSocketMessage(data) {
       samplerNodeMaxMap = {};
 
       updateProgress(0, 0, 'Interrupted');
-
-      const btnGenerate = document.getElementById('btn-generate');
-      btnGenerate.innerHTML = `
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-        <span>Generate Image</span>
-      `;
-      btnGenerate.disabled = false;
-      btnGenerate.classList.remove('btn-disabled');
-      btnGenerate.classList.remove('btn-danger');
-      btnGenerate.classList.add('btn-primary');
+      stopJobTimer();
       checkQueueStatus();
       break;
     }
@@ -1750,6 +2671,9 @@ function handleWebSocketMessage(data) {
 
       showToast('Execution Error', data.data.exception_message || 'An error occurred during ComfyUI execution', 'error');
 
+      if (activePromptId) {
+        delete promptSamplerCountsMap[activePromptId];
+      }
       activePromptId = null;
       pendingPromptId = false;
       savedForPromptId = null; promptSavedPath = null; // Reset so the next generation can auto-save
@@ -1762,16 +2686,7 @@ function handleWebSocketMessage(data) {
       samplerNodeMaxMap = {};
 
       updateProgress(0, 0, 'Error');
-
-      const btnGenerate = document.getElementById('btn-generate');
-      btnGenerate.innerHTML = `
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-        <span>Generate Image</span>
-      `;
-      btnGenerate.disabled = false;
-      btnGenerate.classList.remove('btn-disabled');
-      btnGenerate.classList.remove('btn-danger');
-      btnGenerate.classList.add('btn-primary');
+      stopJobTimer();
       checkQueueStatus();
       break;
     }
@@ -1845,6 +2760,42 @@ function handleWebSocketMessage(data) {
   }
 }
 
+// ─── Job Timer Helpers ─────────────────────────────────────────────────────────────
+function startJobTimer() {
+  stopJobTimer(); // Clear any existing timer first
+  jobStartTime = Date.now();
+  const jobTimeEl = document.getElementById('job-time');
+  if (jobTimeEl) {
+    jobTimeEl.textContent = '0s';
+  }
+  
+  jobTimerInterval = setInterval(() => {
+    if (!jobStartTime) return;
+    const elapsedMs = Date.now() - jobStartTime;
+    if (jobTimeEl) {
+      jobTimeEl.textContent = formatJobTime(elapsedMs);
+    }
+  }, 500);
+}
+
+function stopJobTimer() {
+  if (jobTimerInterval) {
+    clearInterval(jobTimerInterval);
+    jobTimerInterval = null;
+  }
+}
+
+function formatJobTime(elapsedMs) {
+  const elapsedSeconds = Math.floor(elapsedMs / 1000);
+  if (elapsedSeconds < 60) {
+    return `${elapsedSeconds}s`;
+  } else {
+    const minutes = Math.floor(elapsedSeconds / 60);
+    const seconds = elapsedSeconds % 60;
+    return `${minutes}m ${seconds.toString().padStart(2, '0')}s`;
+  }
+}
+
 function updateProgress(val, max, labelText) {
   const fill = document.getElementById('progress-fill');
   const text = document.getElementById('progress-text');
@@ -1895,7 +2846,7 @@ function injectParamsIntoWebUiWorkflow(wuJson) {
     }
     if (slot.rotateNodeId && slot.rotation) {
       if (!uiValues[slot.rotateNodeId]) uiValues[slot.rotateNodeId] = {};
-      uiValues[slot.rotateNodeId]['rotation'] = slot.rotation;
+      uiValues[slot.rotateNodeId]['rotation'] = mapUiRotationToComfy(slot.rotation);
     }
   });
 
@@ -1956,23 +2907,6 @@ function initWebUiWorkflowLoader() {
   const nameEl   = document.getElementById('webui-workflow-filename');
   if (!btnLoad || !nameEl) return;
 
-  // Helper: validate, store and display a Web UI format JSON
-  function applyWebUiWorkflow(json, fileName) {
-    if (!json.nodes || !Array.isArray(json.nodes)) {
-      showToast('Wrong Format',
-        'This is an API format file. Use the API Format row below to load it.',
-        'error');
-      return;
-    }
-    webUiWorkflow = json;
-    localStorage.setItem('comfyui_webui_workflow_json', JSON.stringify(json));
-    localStorage.setItem('comfyui_webui_workflow_filename', fileName);
-    nameEl.value = fileName;
-    nameEl.classList.add('loaded');
-    if (btnClear) btnClear.disabled = false;
-    showToast('Web UI Workflow Loaded', `${fileName} — layout will be embedded in saved PNGs`, 'success');
-  }
-
   // Restore persisted Web UI workflow from localStorage
   const savedJson = localStorage.getItem('comfyui_webui_workflow_json');
   const savedName = localStorage.getItem('comfyui_webui_workflow_filename');
@@ -1992,7 +2926,17 @@ function initWebUiWorkflowLoader() {
   btnLoad.addEventListener('click', async () => {
     try {
       const fileData = await window.api.selectWorkflowFile();
-      if (fileData) applyWebUiWorkflow(fileData.content, fileData.fileName);
+      if (fileData) {
+        applyWebUiWorkflow(fileData.content, fileData.fileName);
+        if (fileData.sister) {
+          const keys = Object.keys(fileData.sister.content);
+          const numericKeys = keys.filter(k => !isNaN(parseInt(k)));
+          if (numericKeys.length > 0) {
+            loadWorkflow(fileData.sister.content, fileData.sister.fileName, true);
+            showToast('Auto-linked API Workflow', `System automatically found and loaded the related API version: ${fileData.sister.fileName}`, 'success');
+          }
+        }
+      }
     } catch (err) {
       showToast('Load Error', err.message, 'error');
     }
@@ -2241,6 +3185,12 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
         openBtn.onclick = () => window.api.openPath({ path: result.savedPath });
         console.log(`[AutoSave] Saved: ${result.savedPath}`);
 
+        // Mark image as saved for this prompt and check if we can clear job history
+        if (promptId) {
+          savedPromptIds.add(promptId);
+          await checkAndClearComfyHistory(promptId);
+        }
+
         // Auto increment Starting No.
         const nextStartingNo = startingNo + 1;
         if (startingNoInput) {
@@ -2249,11 +3199,23 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
         } else {
           localStorage.setItem('autosave_starting_no', nextStartingNo);
         }
+
+        // Auto-run Face Fusion if checked
+        const autoSendFf = document.getElementById('auto-send-ff');
+        if (autoSendFf && autoSendFf.checked) {
+          triggerAutoFaceFusion(result.savedPath);
+        }
       } else {
         console.error(`[AutoSave Failed] ${result.error}`);
       }
     } catch (err) {
       console.error(`[AutoSave Error] ${err.message}`);
+    }
+  } else {
+    // If output folder is not configured but auto-send-ff is checked, warn the user
+    const autoSendFf = document.getElementById('auto-send-ff');
+    if (autoSendFf && autoSendFf.checked && !outputFolderPath) {
+      showToast('Face Fusion Trigger Failed', 'Please configure an Output Folder in Output Setting to enable auto Face Fusion processing.', 'warning');
     }
   }
 }
@@ -2275,13 +3237,15 @@ async function loadImageToElement(imgEl, url) {
 
 // Helper: Send interrupt command to ComfyUI and queue to delete the prompt ID
 async function interruptActiveGeneration() {
-  const btnGenerate = document.getElementById('btn-generate');
-  btnGenerate.disabled = true;
-  btnGenerate.classList.add('btn-disabled');
-  btnGenerate.innerHTML = `
-    <div class="spinner" style="width: 14px; height: 14px; border-width: 2px;"></div>
-    <span>Stopping...</span>
-  `;
+  const btnStop = document.getElementById('btn-stop');
+  if (btnStop) {
+    btnStop.disabled = true;
+    btnStop.classList.add('btn-disabled');
+    btnStop.innerHTML = `
+      <div class="spinner" style="width: 14px; height: 14px; border-width: 2px;"></div>
+      <span>Stopping...</span>
+    `;
+  }
   
   try {
     window.api.logDebug({ message: `Interrupt requested. activePromptId=${activePromptId}` });
@@ -2310,250 +3274,296 @@ async function interruptActiveGeneration() {
     document.getElementById('current-node').textContent = 'Interrupted';
     document.getElementById('display-loading').classList.add('hidden');
     updateProgress(0, 0, 'Ready');
+    stopJobTimer();
     
-    btnGenerate.disabled = false;
-    btnGenerate.classList.remove('btn-disabled');
-    btnGenerate.classList.remove('btn-danger');
-    btnGenerate.classList.add('btn-primary');
-    btnGenerate.innerHTML = `
-      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-      <span>Generate Image</span>
-    `;
+    if (btnStop) {
+      btnStop.innerHTML = `
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/></svg>
+        <span>Stop</span>
+      `;
+    }
     
     checkQueueStatus();
   } catch (err) {
     console.error('Failed to interrupt generation:', err);
     // Restore Stop button on failure
-    btnGenerate.disabled = false;
-    btnGenerate.classList.remove('btn-disabled');
-    btnGenerate.classList.add('btn-danger');
-    btnGenerate.innerHTML = `
-      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/></svg>
-      <span>Stop Generation</span>
-    `;
+    if (btnStop) {
+      btnStop.disabled = false;
+      btnStop.classList.remove('btn-disabled');
+      btnStop.innerHTML = `
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/></svg>
+        <span>Stop</span>
+      `;
+    }
   }
 }
 
 // 6. Queue Generation Prompt Submission
 function initGeneration() {
-  const btnGenerate = document.getElementById('btn-generate');
+  const btnRun = document.getElementById('btn-run');
+  const btnStop = document.getElementById('btn-stop');
 
-  btnGenerate.addEventListener('click', async () => {
-    if (window.api && typeof window.api.logDebug === 'function') {
-      window.api.logDebug({
-        message: `btnGenerate clicked. wsState=${ws ? ws.readyState : 'null'}, hasWorkflow=${!!currentWorkflow}, activePrompt=${activePromptId}, pendingPrompt=${pendingPromptId}`
-      });
-    }
-
-    try {
-      if (activePromptId || pendingPromptId) {
-        interruptActiveGeneration();
-        return;
+  if (btnRun) {
+    btnRun.addEventListener('click', async () => {
+      if (window.api && typeof window.api.logDebug === 'function') {
+        window.api.logDebug({
+          message: `btnRun clicked. wsState=${ws ? ws.readyState : 'null'}, hasWorkflow=${!!currentWorkflow}, activePrompt=${activePromptId}`
+        });
       }
 
-      if (!currentWorkflow || !ws || ws.readyState !== WebSocket.OPEN) {
-        const warningMsg = `Cannot start generation: currentWorkflow is ${!!currentWorkflow ? 'loaded' : 'null'}, ws is ${ws ? 'instantiated' : 'null'}, readyState is ${ws ? ws.readyState : 'n/a'}`;
-        console.warn(warningMsg);
-        if (window.api && typeof window.api.logDebug === 'function') {
-          window.api.logDebug({ message: warningMsg });
+      try {
+        if (!currentWorkflow || !ws || ws.readyState !== WebSocket.OPEN) {
+          const warningMsg = `Cannot start generation: currentWorkflow is ${!!currentWorkflow ? 'loaded' : 'null'}, ws is ${ws ? 'instantiated' : 'null'}, readyState is ${ws ? ws.readyState : 'n/a'}`;
+          console.warn(warningMsg);
+          if (window.api && typeof window.api.logDebug === 'function') {
+            window.api.logDebug({ message: warningMsg });
+          }
+          return;
         }
-        return;
-      }
 
-      // 1. Compile variables from dynamic form into workflow JSON
-      const workflowCopy = JSON.parse(JSON.stringify(currentWorkflow));
+        // Disable run button temporarily to avoid double clicks during POST
+        btnRun.disabled = true;
+        btnRun.classList.add('btn-disabled');
 
-      paramMappings.forEach(mapping => {
-        const inputEl = document.getElementById(mapping.elementId);
-        if (inputEl) {
-          let value = inputEl.value;
+        // 1. Compile variables from dynamic form into workflow JSON
+        const workflowCopy = JSON.parse(JSON.stringify(currentWorkflow));
 
-          // Handle seed generation mode
-          if (mapping.isSeed && typeof inputEl.randomMode === 'function') {
-            const isRandom = inputEl.randomMode();
-            if (isRandom) {
-              value = Math.floor(Math.random() * 9007199254740991); // ComfyUI Max Seed
-              inputEl.value = value; // Update seed text box visually
+        paramMappings.forEach(mapping => {
+          const inputEl = document.getElementById(mapping.elementId);
+          if (inputEl) {
+            let value = inputEl.value;
+
+            // Handle seed generation mode
+            if (mapping.isSeed && typeof inputEl.randomMode === 'function') {
+              const isRandom = inputEl.randomMode();
+              if (isRandom) {
+                value = Math.floor(Math.random() * 9007199254740991); // ComfyUI Max Seed
+                inputEl.value = value; // Update seed text box visually
+              }
+            }
+
+            // Convert type
+            if (mapping.type === 'number') {
+              value = Number(value);
+            }
+
+            // Write back to workflow JSON clone
+            if (workflowCopy[mapping.nodeId] && workflowCopy[mapping.nodeId].inputs) {
+              workflowCopy[mapping.nodeId].inputs[mapping.key] = value;
             }
           }
+        });
 
-          // Convert type
-          if (mapping.type === 'number') {
-            value = Number(value);
-          }
+        // 1b. Apply image slot states: handle enabled/rotation/flip, or prune disabled pipelines
+        imageSlots.forEach(slotState => {
+          const { nodeId, rotateNodeId, flipNodeId, enabled, rotation, flip } = slotState;
+          if (!nodeId) return; // Inactive slot — nothing to do
 
-          // Write back to workflow JSON clone
-          if (workflowCopy[mapping.nodeId] && workflowCopy[mapping.nodeId].inputs) {
-            workflowCopy[mapping.nodeId].inputs[mapping.key] = value;
-          }
-        }
-      });
+          if (enabled) {
+            // Update image filename in LoadImage node
+            const hiddenInput = document.getElementById(`img-slot-${slotState.slotIndex}-hidden`);
+            if (hiddenInput && hiddenInput.value && workflowCopy[nodeId]) {
+              workflowCopy[nodeId].inputs.image = hiddenInput.value;
+            }
 
-      // 1b. Apply image slot states: handle enabled/rotation, or prune disabled pipelines
-      imageSlots.forEach(slotState => {
-        const { nodeId, rotateNodeId, enabled, rotation } = slotState;
-        if (!nodeId) return; // Inactive slot — nothing to do
+            // Route the pipeline depending on whether flip is active
+            if (flipNodeId && workflowCopy[flipNodeId] && flip !== 'none') {
+              // 1. Flip is active.
+              // Set LoadImage -> ImageFlip
+              workflowCopy[flipNodeId].inputs.image = [nodeId, 0];
+              // Set flip_method
+              if (flip === 'horizontal') {
+                workflowCopy[flipNodeId].inputs.flip_method = "y-axis: horizontally";
+              } else if (flip === 'vertical') {
+                workflowCopy[flipNodeId].inputs.flip_method = "x-axis: vertically";
+              }
 
-        if (enabled) {
-          // Update image filename in LoadImage node
-          const hiddenInput = document.getElementById(`img-slot-${slotState.slotIndex}-hidden`);
-          if (hiddenInput && hiddenInput.value && workflowCopy[nodeId]) {
-            workflowCopy[nodeId].inputs.image = hiddenInput.value;
-          }
-          // Update rotation in ImageRotate node
-          if (rotateNodeId && workflowCopy[rotateNodeId]) {
-            workflowCopy[rotateNodeId].inputs.rotation = rotation;
-          }
-        } else {
-          // Disabled slot: prune the LoadImage pipeline from the workflow copy
-          // 1. Collect all nodes that are part of this image pipeline
-          //    (directly or transitively downstream of LoadImage, EXCLUDING sampler/output nodes)
-          const IMAGE_PIPELINE_TYPES = new Set([
-            'LoadImage', 'ImageRotate', 'ImageFlip',
-            'ImageScaleToTotalPixels', 'ImageScale', 'ImageResize',
-            'PreviewImage'
-          ]);
+              // Set ImageFlip -> ImageRotate (if rotate exists)
+              if (rotateNodeId && workflowCopy[rotateNodeId]) {
+                workflowCopy[rotateNodeId].inputs.image = [flipNodeId, 0];
+                workflowCopy[rotateNodeId].inputs.rotation = mapUiRotationToComfy(rotation);
+              }
+            } else {
+              // 2. Flip is NOT active (or no flip node).
+              // Delete Flip node from workflow copy so it doesn't run
+              if (flipNodeId) {
+                delete workflowCopy[flipNodeId];
+              }
 
-          // BFS: starting from LoadImage, collect all downstream image-pipeline nodes
-          const pipelineNodes = new Set([nodeId]);
-          let changed = true;
-          while (changed) {
-            changed = false;
+              // Set LoadImage -> ImageRotate (if rotate exists)
+              if (rotateNodeId && workflowCopy[rotateNodeId]) {
+                workflowCopy[rotateNodeId].inputs.image = [nodeId, 0];
+                workflowCopy[rotateNodeId].inputs.rotation = mapUiRotationToComfy(rotation);
+              }
+            }
+
+            // 3. Ensure downstream nodes connect to the correct endpoint of the pipeline
+            // The active pipeline endpoint is:
+            // - If Rotate node exists: Rotate node
+            // - Else if Flip node exists & is active: Flip node
+            // - Else: LoadImage node
+            let pipelineEndpointId = nodeId;
+            if (rotateNodeId && workflowCopy[rotateNodeId]) {
+              pipelineEndpointId = rotateNodeId;
+            } else if (flipNodeId && workflowCopy[flipNodeId] && flip !== 'none') {
+              pipelineEndpointId = flipNodeId;
+            }
+
+            // Now trace all nodes in the workflow copy and if their input references
+            // nodeId, rotateNodeId, or flipNodeId, redirect it to pipelineEndpointId
+            // EXCLUDING the internal connections of the pipeline itself.
+            const pipelineNodeIds = new Set([nodeId]);
+            if (rotateNodeId) pipelineNodeIds.add(rotateNodeId);
+            if (flipNodeId) pipelineNodeIds.add(flipNodeId);
+
             for (const wNodeId in workflowCopy) {
-              if (pipelineNodes.has(wNodeId)) continue;
+              // Skip modifying the pipeline nodes themselves
+              if (pipelineNodeIds.has(wNodeId)) continue;
+
               const wNode = workflowCopy[wNodeId];
               if (!wNode || !wNode.inputs) continue;
-              if (!IMAGE_PIPELINE_TYPES.has(wNode.class_type)) continue;
-              // Check if any input links to a pipelineNode
               for (const inputKey in wNode.inputs) {
                 const val = wNode.inputs[inputKey];
-                if (Array.isArray(val) && val.length === 2 && pipelineNodes.has(String(val[0]))) {
-                  pipelineNodes.add(wNodeId);
-                  changed = true;
-                  break;
+                if (Array.isArray(val) && val.length === 2) {
+                  const sourceNodeId = String(val[0]);
+                  if (pipelineNodeIds.has(sourceNodeId)) {
+                    // Redirect to the final endpoint of this pipeline
+                    wNode.inputs[inputKey] = [pipelineEndpointId, val[1]];
+                  }
                 }
               }
             }
-          }
+          } else {
+            // Disabled slot: prune the LoadImage pipeline from the workflow copy
+            // 1. Collect all nodes that are part of this image pipeline
+            //    (directly or transitively downstream of LoadImage, EXCLUDING sampler/output nodes)
+            const IMAGE_PIPELINE_TYPES = new Set([
+              'LoadImage', 'ImageRotate', 'ImageFlip',
+              'ImageScaleToTotalPixels', 'ImageScale', 'ImageResize',
+              'PreviewImage'
+            ]);
 
-          // Delete all pipeline nodes from the workflow copy
-          pipelineNodes.forEach(pid => {
-            delete workflowCopy[pid];
-          });
-
-          // 2. Remove image links from downstream multi-input nodes (e.g. TextEncodeQwenImageEditPlus)
-          //    Any input that still references a deleted node should be removed
-          for (const wNodeId in workflowCopy) {
-            const wNode = workflowCopy[wNodeId];
-            if (!wNode || !wNode.inputs) continue;
-            for (const inputKey in wNode.inputs) {
-              const val = wNode.inputs[inputKey];
-              if (Array.isArray(val) && val.length === 2 && pipelineNodes.has(String(val[0]))) {
-                delete wNode.inputs[inputKey];
+            // BFS: starting from LoadImage, collect all downstream image-pipeline nodes
+            const pipelineNodes = new Set([nodeId]);
+            let changed = true;
+            while (changed) {
+              changed = false;
+              for (const wNodeId in workflowCopy) {
+                if (pipelineNodes.has(wNodeId)) continue;
+                const wNode = workflowCopy[wNodeId];
+                if (!wNode || !wNode.inputs) continue;
+                if (!IMAGE_PIPELINE_TYPES.has(wNode.class_type)) continue;
+                // Check if any input links to a pipelineNode
+                for (const inputKey in wNode.inputs) {
+                  const val = wNode.inputs[inputKey];
+                  if (Array.isArray(val) && val.length === 2 && pipelineNodes.has(String(val[0]))) {
+                    pipelineNodes.add(wNodeId);
+                    changed = true;
+                    break;
+                  }
+                }
               }
             }
+
+            // Delete all pipeline nodes from the workflow copy
+            pipelineNodes.forEach(pid => {
+              delete workflowCopy[pid];
+            });
+
+            // 2. Remove image links from downstream multi-input nodes (e.g. TextEncodeQwenImageEditPlus)
+            //    Any input that still references a deleted node should be removed
+            for (const wNodeId in workflowCopy) {
+              const wNode = workflowCopy[wNodeId];
+              if (!wNode || !wNode.inputs) continue;
+              for (const inputKey in wNode.inputs) {
+                const val = wNode.inputs[inputKey];
+                if (Array.isArray(val) && val.length === 2 && pipelineNodes.has(String(val[0]))) {
+                  delete wNode.inputs[inputKey];
+                }
+              }
+            }
+
+            window.api.logDebug({ message: `Image slot ${slotState.slotIndex + 1} disabled: pruned nodes [${[...pipelineNodes].join(', ')}]` });
           }
+        });
 
-          window.api.logDebug({ message: `Image slot ${slotState.slotIndex + 1} disabled: pruned nodes [${[...pipelineNodes].join(', ')}]` });
-        }
-      });
+        // Count sampler nodes in workflowCopy for progress estimation of this specific job.
+        const newSamplerCount = countSamplerNodes(workflowCopy);
+        window.api.logDebug({ message: `newSamplerCount on click: ${newSamplerCount}` });
 
-      // Count sampler nodes for progress estimation.
-      // We no longer try to read inputs.steps here because it may be a link array [nodeId, outputIdx]
-      // rather than a literal number when the workflow uses Primitive/value nodes. Instead, we
-      // discover the actual max from the first live 'progress' event each sampler emits.
-      estimatedSamplerCount = 0;
-      for (const nodeId in workflowCopy) {
-        const node = workflowCopy[nodeId];
-        if (node) {
-          const classType = node.class_type || '';
-          if (classType.includes('Sampler') || classType === 'KSampler' || classType === 'KSamplerAdvanced') {
-            estimatedSamplerCount++;
+        // Set pending flag BEFORE the POST so execution_start events that arrive
+        // before the response can still be matched to this generation.
+        pendingPromptId = true;
+        
+        // Reset save state for new generation
+        savedForPromptId = null;
+        promptSavedPath = null;
+
+        // Snapshot the fully-resolved workflow (with randomised seeds) for metadata embedding later
+        lastSubmittedWorkflow = workflowCopy;
+
+        // 2. Submit prompt JSON to ComfyUI
+        //    Read the selected preview method from the UI dropdown (defaults to 'auto').
+        const previewSelect = document.getElementById('preview-method-select');
+        const previewMethod = (previewSelect && previewSelect.value) || localStorage.getItem('preview_method') || 'auto';
+
+        const payload = {
+          client_id: clientId,
+          prompt: workflowCopy,
+          extra_data: {
+            preview_method: previewMethod
           }
+        };
+
+        const response = await comfyFetch(`/prompt`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(payload)
+        });
+
+        const result = await response.json();
+        
+        // Add to our queued prompt IDs tracking set
+        if (result && result.prompt_id) {
+          myQueuedPromptIds.add(result.prompt_id);
+          promptSamplerCountsMap[result.prompt_id] = newSamplerCount;
+          window.api.logDebug({ message: `Prompt added to myQueuedPromptIds: ${result.prompt_id}, samplerCount: ${newSamplerCount}` });
+          console.log(`Prompt queued successfully! Prompt ID: ${result.prompt_id}`);
         }
-      }
-      // Reset dynamic tracking state — it will be rebuilt from live progress events
-      totalWorkflowSteps = 0;
-      samplerNodeMaxMap = {};
-      window.api.logDebug({ message: `estimatedSamplerCount on click: ${estimatedSamplerCount}` });
 
-      // Set pending flag BEFORE the POST so execution_start events that arrive
-      // before the response can still be matched to this generation.
-      activePromptId = null;
-      pendingPromptId = true;
-      
-      // Reset save state for new generation
-      savedForPromptId = null;
-      promptSavedPath = null;
+        pendingPromptId = false;
 
-      // Snapshot the fully-resolved workflow (with randomised seeds) for metadata embedding later
-      lastSubmittedWorkflow = workflowCopy;
+        // Re-enable Run button so they can click it again to queue more
+        btnRun.disabled = false;
+        btnRun.classList.remove('btn-disabled');
 
-      // Change generate button to Stop/Interrupt state
-      btnGenerate.disabled = false;
-      btnGenerate.classList.remove('btn-primary');
-      btnGenerate.classList.add('btn-danger');
-      btnGenerate.innerHTML = `
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/></svg>
-        <span>Stop Generation</span>
-      `;
-
-      // 2. Submit prompt JSON to ComfyUI
-      //    Read the selected preview method from the UI dropdown (defaults to 'auto').
-      //    Sending preview_method in extra_data overrides the server's --preview-method
-      //    CLI flag for this specific prompt, ensuring previews arrive even when ComfyUI
-      //    was started without any preview flag.
-      const previewSelect = document.getElementById('preview-method-select');
-      const previewMethod = (previewSelect && previewSelect.value) || localStorage.getItem('preview_method') || 'auto';
-
-      const payload = {
-        client_id: clientId,
-        prompt: workflowCopy,
-        extra_data: {
-          preview_method: previewMethod
+        // Update Queue info
+        checkQueueStatus();
+      } catch (err) {
+        const errMsg = `Failed to submit workflow: ${err.message}`;
+        console.error(errMsg, err);
+        if (window.api && typeof window.api.logDebug === 'function') {
+          window.api.logDebug({ message: `Click handler exception: ${err.stack || err.message}` });
         }
-      };
-
-      const response = await comfyFetch(`/prompt`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(payload)
-      });
-
-      const result = await response.json();
-      // If execution_start already arrived and bound activePromptId, don't overwrite.
-      // Otherwise set it now from the POST response.
-      if (!activePromptId) {
-        activePromptId = result.prompt_id;
+        alert(errMsg);
+        // Re-enable and restore button style
+        pendingPromptId = false;
+        if (btnRun) {
+          btnRun.disabled = false;
+          btnRun.classList.remove('btn-disabled');
+        }
+        checkQueueStatus();
       }
-      pendingPromptId = false;
-      window.api.logDebug({ message: `Prompt queued. prompt_id=${result.prompt_id} activePromptId=${activePromptId}` });
-      console.log(`Prompt queued successfully! Prompt ID: ${activePromptId}`);
+    });
+  }
 
-      // Update Queue info
-      checkQueueStatus();
-    } catch (err) {
-      const errMsg = `Failed to submit workflow: ${err.message}`;
-      console.error(errMsg, err);
-      if (window.api && typeof window.api.logDebug === 'function') {
-        window.api.logDebug({ message: `Click handler exception: ${err.stack || err.message}` });
-      }
-      alert(errMsg);
-      // Re-enable and restore button style
-      activePromptId = null;
-      pendingPromptId = false;
-      btnGenerate.disabled = false;
-      btnGenerate.classList.remove('btn-disabled');
-      btnGenerate.classList.remove('btn-danger');
-      btnGenerate.classList.add('btn-primary');
-      btnGenerate.innerHTML = `
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-        <span>Generate Image</span>
-      `;
-    }
-  });
+  if (btnStop) {
+    btnStop.addEventListener('click', async () => {
+      await interruptActiveGeneration();
+    });
+  }
 }
 
 // 7. Output Settings Folder Management
@@ -2563,6 +3573,7 @@ function initOutputSettings() {
 
   const prefixInput = document.getElementById('autosave-prefix');
   const insertOriginalCheckbox = document.getElementById('autosave-insert-original');
+  const clearHistoryCheckbox = document.getElementById('autosave-clear-history');
   const paddingInput = document.getElementById('autosave-padding');
   const startingNoInput = document.getElementById('autosave-starting-no');
   const sourceSelect = document.getElementById('autosave-original-source');
@@ -2585,6 +3596,9 @@ function initOutputSettings() {
   }
   if (insertOriginalCheckbox) {
     insertOriginalCheckbox.checked = localStorage.getItem('autosave_insert_original') !== 'false';
+  }
+  if (clearHistoryCheckbox) {
+    clearHistoryCheckbox.checked = localStorage.getItem('autosave_clear_history') === 'true';
   }
   if (paddingInput) {
     paddingInput.value = localStorage.getItem('autosave_padding') ?? '4';
@@ -2760,6 +3774,11 @@ function initOutputSettings() {
       checkAndIncrementStartingNo(1); // Toggle changed → reset to 1
     });
   }
+  if (clearHistoryCheckbox) {
+    clearHistoryCheckbox.addEventListener('change', () => {
+      localStorage.setItem('autosave_clear_history', clearHistoryCheckbox.checked);
+    });
+  }
   if (sourceSelect) {
     sourceSelect.addEventListener('change', () => {
       localStorage.setItem('autosave_original_source', sourceSelect.value);
@@ -2795,8 +3814,12 @@ function initOutputSettings() {
 
   btnSelect.addEventListener('click', async () => {
     try {
-      const selectedDir = await window.api.selectOutputFolder();
+      const selectedDir = await window.api.selectOutputFolder(outputFolderPath);
       if (selectedDir) {
+        if (watchFolderPath && selectedDir.toLowerCase() === watchFolderPath.toLowerCase()) {
+          showToast('Output Folder Error', 'Output Folder cannot be the same as Watch Folder.', 'error');
+          return;
+        }
         outputFolderPath = selectedDir;
         localStorage.setItem('output_folder_path', selectedDir);
         updateOutputFolderUI();
@@ -2836,6 +3859,332 @@ function updateOutputFolderUI() {
   }
 }
 
+// ─── Auto Automation Logic (Face Fusion and Watch Folder) ────────────────────
+let facefusionQueue = [];
+
+function checkAndProcessFacefusionQueue() {
+  const btnRunFf = document.getElementById('btn-run-ff');
+  if (!btnRunFf) return;
+
+  // If already running or busy, wait in queue
+  if (btnRunFf.disabled) {
+    console.log('[FaceFusion Queue] Process is currently busy. Waiting in queue. Remaining items:', facefusionQueue.length);
+    return;
+  }
+
+  if (facefusionQueue.length === 0) {
+    return;
+  }
+
+  const nextPath = facefusionQueue.shift();
+  console.log('[FaceFusion Queue] Processing next queued image:', nextPath);
+  showToast('Queue Processing', `Processing next image in Face Fusion queue. Remaining: ${facefusionQueue.length}`, 'success');
+
+  // Update Face Fusion target
+  ffTargetPath = nextPath;
+  localStorage.setItem('ff_target_path', nextPath);
+
+  const targetPathDisplay = document.getElementById('ff-target-path-display');
+  if (targetPathDisplay) {
+    targetPathDisplay.value = nextPath;
+  }
+
+  const targetPreviewImg = document.getElementById('ff-target-preview-img');
+  const targetPreviewVid = document.getElementById('ff-target-preview-vid');
+  const targetPlaceholder = document.getElementById('ff-target-preview-placeholder');
+
+  if (targetPreviewImg) {
+    targetPreviewImg.src = 'file:///' + nextPath.replace(/\\/g, '/');
+    targetPreviewImg.classList.remove('hidden');
+  }
+  if (targetPreviewVid) {
+    targetPreviewVid.classList.add('hidden');
+  }
+  if (targetPlaceholder) {
+    targetPlaceholder.classList.add('hidden');
+  }
+
+  // Trigger Face Fusion Run
+  btnRunFf.click();
+}
+
+function triggerAutoFaceFusion(savedPath) {
+  facefusionQueue.push(savedPath);
+  console.log(`[FaceFusion Queue] Added image path to queue: ${savedPath}. Total items: ${facefusionQueue.length}`);
+  showToast('Added to Queue', `Image added to Face Fusion queue (${facefusionQueue.length} pending)`, 'info');
+  checkAndProcessFacefusionQueue();
+}
+
+async function setSlotImage(slotIndex, filePath, fileName) {
+  const slotState = imageSlots.find(s => s.slotIndex === slotIndex);
+  if (!slotState || !slotState.nodeId) return false;
+
+  const slotEl = document.querySelector(`.param-item.image-slot[data-slot-index="${slotIndex}"]`);
+  if (!slotEl) return false;
+
+  const hiddenValue = slotEl.querySelector('input[type="hidden"]');
+  const filenameSpan = slotEl.querySelector('.image-picker-filename');
+  const statusSpan = slotEl.querySelector('.image-picker-status');
+  const preview = slotEl.querySelector('.image-picker-preview');
+  const checkbox = slotEl.querySelector('.slot-enable-checkbox');
+
+  if (filenameSpan) {
+    filenameSpan.textContent = fileName;
+    filenameSpan.classList.add('selected');
+  }
+  if (statusSpan) {
+    statusSpan.textContent = 'Uploading...';
+    statusSpan.className = 'image-picker-status uploading';
+  }
+
+  const localUrl = `file:///${filePath.replace(/\\/g, '/')}`;
+  if (preview) {
+    preview.innerHTML = `<img src="${localUrl}" alt="Preview">`;
+    const CSS_ROTATION = { none: 0, '90': 90, '180': 180, '270': 270 };
+    const CSS_FLIP = { none: '', horizontal: 'scaleX(-1)', vertical: 'scaleY(-1)' };
+    const img = preview.querySelector('img');
+    if (img) {
+      const rot = `rotate(${CSS_ROTATION[slotState.rotation] || 0}deg)`;
+      const flipVal = CSS_FLIP[slotState.flip] || '';
+      img.style.transform = `${rot} ${flipVal}`.trim();
+    }
+  }
+
+  try {
+    const uploadResult = await window.api.uploadImageToComfyUI({
+      filePath: filePath,
+      comfyUrl: comfyuiUrl
+    });
+
+    if (uploadResult.ok) {
+      if (hiddenValue) hiddenValue.value = uploadResult.name;
+      slotState.imageFilename = uploadResult.name;
+      if (filenameSpan) filenameSpan.textContent = uploadResult.name;
+      if (statusSpan) {
+        statusSpan.textContent = 'Uploaded';
+        statusSpan.className = 'image-picker-status success';
+      }
+      
+      // Auto enable checkbox if disabled
+      if (checkbox && !checkbox.checked) {
+        checkbox.checked = true;
+        slotState.enabled = true;
+        slotEl.classList.remove('disabled-slot');
+        const selectBtn = slotEl.querySelector('.image-picker-actions button');
+        if (selectBtn) selectBtn.disabled = false;
+        const rotateBtn = slotEl.querySelector('.btn-rotate');
+        if (rotateBtn) rotateBtn.disabled = !slotState.rotateNodeId;
+        const flipSelect = slotEl.querySelector('.select-flip');
+        if (flipSelect) flipSelect.disabled = !slotState.flipNodeId;
+        localStorage.setItem(`img_slot_${slotIndex}_enabled`, 'true');
+      }
+
+      saveWorkflowToLocalStorage();
+      if (window.updateAutosavePreview) window.updateAutosavePreview();
+      updateCompareButtonState();
+      return true;
+    } else {
+      throw new Error(uploadResult.error || 'Upload failed');
+    }
+  } catch (err) {
+    console.error('Auto watch slot upload error:', err);
+    if (statusSpan) {
+      statusSpan.textContent = `Error: ${err.message}`;
+      statusSpan.className = 'image-picker-status error';
+    }
+    if (preview) {
+      preview.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>`;
+    }
+    return false;
+  }
+}
+
+function initAutomationSettings() {
+  const autoSendFf = document.getElementById('auto-send-ff');
+  const autoWatchFolder = document.getElementById('auto-watch-folder');
+  const watchGroup = document.getElementById('watch-folder-settings-group');
+  const watchPathDisplay = document.getElementById('watch-path-display');
+  const btnSelectWatch = document.getElementById('btn-select-watch-folder');
+  const btnClearWatch = document.getElementById('btn-clear-watch-folder');
+
+  // 1. Load settings from localStorage
+  const savedSendFf = localStorage.getItem('auto_send_ff') === 'true';
+  const savedWatchFolder = localStorage.getItem('auto_watch_folder') === 'true';
+  const savedWatchPath = localStorage.getItem('watch_folder_path') || '';
+
+  if (autoSendFf) autoSendFf.checked = savedSendFf;
+  if (autoWatchFolder) autoWatchFolder.checked = savedWatchFolder;
+  if (savedWatchPath) {
+    watchFolderPath = savedWatchPath;
+    updateWatchFolderUI();
+  }
+
+  // Toggle watch settings visibility initially
+  if (watchGroup) {
+    watchGroup.style.display = savedWatchFolder ? 'block' : 'none';
+  }
+
+  // 2. Setup event listeners
+  if (autoSendFf) {
+    autoSendFf.addEventListener('change', () => {
+      localStorage.setItem('auto_send_ff', autoSendFf.checked);
+    });
+  }
+
+  if (autoWatchFolder) {
+    autoWatchFolder.addEventListener('change', async () => {
+      localStorage.setItem('auto_watch_folder', autoWatchFolder.checked);
+      if (watchGroup) {
+        watchGroup.style.display = autoWatchFolder.checked ? 'block' : 'none';
+      }
+
+      if (autoWatchFolder.checked) {
+        if (watchFolderPath) {
+          // Validate watch folder path is not equal to output folder path
+          if (outputFolderPath && watchFolderPath.toLowerCase() === outputFolderPath.toLowerCase()) {
+            showToast('Watch Folder Error', 'Watch Folder cannot be the same as Output Folder to avoid infinite loops.', 'error');
+            autoWatchFolder.checked = false;
+            localStorage.setItem('auto_watch_folder', 'false');
+            watchGroup.style.display = 'none';
+            return;
+          }
+          
+          const result = await window.api.startWatchingFolder(watchFolderPath);
+          if (result.ok) {
+            showToast('Watch Folder Active', `Monitoring folder:\n${watchFolderPath}`, 'success');
+          } else {
+            showToast('Watch Folder Error', result.error || 'Failed to start folder watcher', 'error');
+          }
+        } else {
+          showToast('No Folder Configured', 'Please browse and select a watch folder.', 'warning');
+        }
+      } else {
+        await window.api.stopWatchingFolder();
+        showToast('Watch Folder Disabled', 'Folder monitoring has been stopped.', 'info');
+      }
+    });
+  }
+
+  if (btnSelectWatch) {
+    btnSelectWatch.addEventListener('click', async () => {
+      try {
+        const selectedDir = await window.api.selectOutputFolder(watchFolderPath);
+        if (selectedDir) {
+          if (outputFolderPath && selectedDir.toLowerCase() === outputFolderPath.toLowerCase()) {
+            showToast('Watch Folder Error', 'Watch Folder cannot be the same as Output Folder.', 'error');
+            return;
+          }
+
+          watchFolderPath = selectedDir;
+          localStorage.setItem('watch_folder_path', selectedDir);
+          updateWatchFolderUI();
+
+          if (autoWatchFolder && autoWatchFolder.checked) {
+            const result = await window.api.startWatchingFolder(selectedDir);
+            if (result.ok) {
+              showToast('Watch Folder Set', `Monitoring folder:\n${selectedDir}`, 'success');
+            } else {
+              showToast('Watch Folder Error', result.error || 'Failed to start folder watcher', 'error');
+            }
+          } else {
+            showToast('Watch Folder Set', `Folder set to:\n${selectedDir}`, 'success');
+          }
+        }
+      } catch (err) {
+        showToast('Selection Error', err.message, 'error');
+      }
+    });
+  }
+
+  if (btnClearWatch) {
+    btnClearWatch.addEventListener('click', async () => {
+      watchFolderPath = '';
+      localStorage.removeItem('watch_folder_path');
+      updateWatchFolderUI();
+      if (autoWatchFolder && autoWatchFolder.checked) {
+        await window.api.stopWatchingFolder();
+      }
+      showToast('Watch Folder Cleared', 'Folder monitoring path has been cleared.', 'info');
+    });
+  }
+
+  function updateWatchFolderUI() {
+    if (watchPathDisplay && btnClearWatch) {
+      if (watchFolderPath) {
+        watchPathDisplay.textContent = watchFolderPath;
+        watchPathDisplay.title = watchFolderPath;
+        watchPathDisplay.classList.add('configured');
+        btnClearWatch.disabled = false;
+      } else {
+        watchPathDisplay.textContent = 'Not configured';
+        watchPathDisplay.title = 'Not configured';
+        watchPathDisplay.classList.remove('configured');
+        btnClearWatch.disabled = true;
+      }
+    }
+  }
+
+  // 3. Register watch folder IPC listener
+  if (window.api && typeof window.api.onWatchFolderNewImage === 'function') {
+    window.api.onWatchFolderNewImage(async (data) => {
+      if (!autoWatchFolder || !autoWatchFolder.checked) return;
+
+      console.log(`[AutoWatch] New image detected in watch folder: ${data.filePath}`);
+
+      // Find the first active slot
+      const activeSlot = imageSlots.find(s => s.nodeId !== null);
+      if (activeSlot) {
+        showToast('Auto Watch Trigger', `Uploading ${data.fileName} to Slot ${activeSlot.slotIndex + 1}...`, 'success');
+        const uploadOk = await setSlotImage(activeSlot.slotIndex, data.filePath, data.fileName);
+        if (uploadOk) {
+          triggerComfyRun();
+        } else {
+          showToast('Trigger Failed', 'Failed to upload new image to slot.', 'error');
+        }
+      } else {
+        // No slots in active workflow, run directly
+        triggerComfyRun();
+      }
+    });
+  }
+
+  function triggerComfyRun() {
+    const btnRun = document.getElementById('btn-run');
+    if (btnRun) {
+      if (btnRun.disabled || btnRun.classList.contains('btn-disabled')) {
+        console.warn('[AutoWatch] ComfyUI generator is currently busy. Queueing skipped.');
+        showToast('Generator Busy', 'A ComfyUI run is in progress. The auto-trigger will not execute.', 'warning');
+      } else {
+        console.log('[AutoWatch] Automatically clicking ComfyUI Run...');
+        showToast('Auto Run Triggered', 'Starting ComfyUI generation run...', 'success');
+        btnRun.click();
+      }
+    }
+  }
+
+  // 4. Initial startup auto-start if checkbox was checked
+  if (savedWatchFolder && savedWatchPath) {
+    if (outputFolderPath && savedWatchPath.toLowerCase() === outputFolderPath.toLowerCase()) {
+      console.warn('[AutoWatch] Watch path matches output path on startup. Watching disabled to prevent infinite loop.');
+      if (autoWatchFolder) autoWatchFolder.checked = false;
+      localStorage.setItem('auto_watch_folder', 'false');
+      if (watchGroup) watchGroup.style.display = 'none';
+      return;
+    }
+
+    setTimeout(() => {
+      window.api.startWatchingFolder(savedWatchPath).then(result => {
+        if (result.ok) {
+          console.log(`[AutoWatch] Started watching folder on startup: ${savedWatchPath}`);
+        } else {
+          console.error(`[AutoWatch] Failed to start watching on startup: ${result.error}`);
+        }
+      });
+    }, 1000);
+  }
+}
+
+
 // 8. Notification — silent (console only, no popup)
 function showToast(title, message, type = 'success', action = null) {
   if (type === 'error') {
@@ -2843,10 +4192,55 @@ function showToast(title, message, type = 'success', action = null) {
   } else {
     console.log(`[${title}] ${message}`);
   }
+  if (window.api && typeof window.api.logDebug === 'function') {
+    window.api.logDebug({ message: `Toast: [${title}] (${type}) - ${message}` });
+  }
   // action callbacks are dropped silently
 }
 
 function dismissToast() {}
+
+// 8b. Connection Modal Helpers & Initialization
+function showConnectionModal() {
+  const modal = document.getElementById('connection-modal');
+  if (modal) modal.classList.remove('hidden');
+}
+
+function hideConnectionModal() {
+  const modal = document.getElementById('connection-modal');
+  if (modal) modal.classList.add('hidden');
+}
+
+function switchToTab(tabId) {
+  const navItem = document.querySelector(`.nav-item[data-tab="${tabId}"]`);
+  if (navItem) {
+    navItem.click();
+  }
+}
+
+function initConnectionModal() {
+  const btnConfigure = document.getElementById('btn-modal-configure');
+  const btnRetry = document.getElementById('btn-modal-retry');
+  
+  if (btnConfigure) {
+    btnConfigure.addEventListener('click', () => {
+      switchToTab('tab-service');
+      hideConnectionModal();
+    });
+  }
+  
+  if (btnRetry) {
+    btnRetry.addEventListener('click', () => {
+      if (isConnecting || isRetryingConnection) return;
+      isRetryingConnection = true;
+      btnRetry.textContent = 'Connecting...';
+      btnRetry.disabled = true;
+      if (btnConfigure) btnConfigure.disabled = true;
+      
+      connectToComfyUI();
+    });
+  }
+}
 
 // 9. Image Comparison Slider Features
 function initCompareFeature() {
@@ -2996,10 +4390,12 @@ async function toggleCompareMode(forceState = null) {
     if (slot && slot.imageFilename && imgTop) {
       const inputUrl = `${comfyuiUrl}/view?filename=${encodeURIComponent(slot.imageFilename)}&type=input`;
       
-      // Load input image and apply rotation if needed
+      // Load input image and apply rotation and flip if needed
       const ROTATION_DEGS = { none: 0, '90': 90, '180': 180, '270': 270 };
       const rotationAngle = ROTATION_DEGS[slot.rotation] || 0;
-      imgTop.style.transform = `rotate(${rotationAngle}deg)`;
+      const CSS_FLIP = { none: '', horizontal: 'scaleX(-1)', vertical: 'scaleY(-1)' };
+      const flipVal = CSS_FLIP[slot.flip] || '';
+      imgTop.style.transform = `rotate(${rotationAngle}deg) ${flipVal}`.trim();
 
       // Fetch input image safely through Main Process proxy
       await loadImageToElement(imgTop, inputUrl);
@@ -3022,3 +4418,954 @@ async function toggleCompareMode(forceState = null) {
     if (resultImg) resultImg.classList.remove('hidden');
   }
 }
+
+// ─── Face Fusion Standalone Control Logic ────────────────────────────────────
+let ffSourcePath = '';
+let ffTargetPath = '';
+let ffLastOutputPath = '';
+
+function initFacefusionTab() {
+  const ffFolderInput = document.getElementById('ff-folder-path');
+  const ffPythonInput = document.getElementById('ff-python-path');
+  const ffCondaPathInput = document.getElementById('ff-conda-path');
+  const ffEnvTypeSelect = document.getElementById('ff-env-type');
+  const condaGroup = document.getElementById('ff-conda-group');
+  const venvGroup = document.getElementById('ff-venv-group');
+  const condaEnvInput = document.getElementById('ff-conda-env');
+  
+  const btnSelectFFFolder = document.getElementById('btn-select-ff-folder');
+  const btnSelectFFPython = document.getElementById('btn-select-ff-python');
+  const btnSelectFFCondaPath = document.getElementById('btn-select-ff-conda-path');
+  const btnSelectSource = document.getElementById('btn-select-ff-source');
+  const btnSelectTarget = document.getElementById('btn-select-ff-target');
+  const sourcePathDisplay = document.getElementById('ff-source-path-display');
+  const targetPathDisplay = document.getElementById('ff-target-path-display');
+  
+  const sourcePreview = document.getElementById('ff-source-preview');
+  const sourcePlaceholder = document.getElementById('ff-source-preview-placeholder');
+  const targetPreviewImg = document.getElementById('ff-target-preview-img');
+  const targetPreviewVid = document.getElementById('ff-target-preview-vid');
+  const targetPlaceholder = document.getElementById('ff-target-preview-placeholder');
+  
+  const cbSwapper = document.getElementById('ff-proc-swapper');
+  const cbEnhancer = document.getElementById('ff-proc-enhancer');
+  const cbLipSyncer = document.getElementById('ff-proc-lip-syncer');
+  const selectProvider = document.getElementById('ff-execution-provider');
+  
+  const swapperModelSelect = document.getElementById('ff-swapper-model');
+  const swapperPixelBoostSelect = document.getElementById('ff-swapper-pixel-boost');
+  const swapperWeightRange = document.getElementById('ff-swapper-weight-range');
+  const swapperWeightNumber = document.getElementById('ff-swapper-weight-number');
+  const selectorModeSelect = document.getElementById('ff-selector-mode');
+  const selectorOrderSelect = document.getElementById('ff-selector-order');
+  
+  const btnRun = document.getElementById('btn-run-ff');
+  const btnStop = document.getElementById('btn-stop-ff');
+  const statusText = document.getElementById('ff-status-text');
+  const progressText = document.getElementById('ff-progress-text');
+  const progressFill = document.getElementById('ff-progress-fill');
+  const consoleLogs = document.getElementById('ff-console-logs');
+  const btnClearConsole = document.getElementById('btn-clear-ff-console');
+  const timeText = document.getElementById('ff-time-text');
+  
+  const btnOpenFolder = document.getElementById('btn-ff-open-output-folder');
+  const btnOpenViewer = document.getElementById('btn-ff-open-viewer');
+  
+  const outputEmpty = document.getElementById('ff-output-empty');
+  const outputImgContainer = document.getElementById('ff-output-image-container');
+  const outputVidContainer = document.getElementById('ff-output-video-container');
+  const resultImg = document.getElementById('ff-result-img');
+  const resultVid = document.getElementById('ff-result-vid');
+
+  // Helper to convert path to local file URL
+  function getLocalFileUrl(absolutePath) {
+    if (!absolutePath) return '';
+    return 'file:///' + absolutePath.replace(/\\/g, '/');
+  }
+
+  // Helper to extract directory path from file path
+  function getDirectoryOfFile(filePath) {
+    if (!filePath) return '';
+    const lastIndex = Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/'));
+    if (lastIndex !== -1) {
+      return filePath.substring(0, lastIndex);
+    }
+    return filePath;
+  }
+
+  // Helper to toggle visible form fields based on env type
+  function toggleEnvFields(type) {
+    if (type === 'conda') {
+      if (condaGroup) condaGroup.classList.remove('hidden');
+      if (venvGroup) venvGroup.classList.add('hidden');
+    } else {
+      if (condaGroup) condaGroup.classList.add('hidden');
+      if (venvGroup) venvGroup.classList.remove('hidden');
+    }
+  }
+
+  // 1. Load persisted paths and settings
+  const savedEnvType = localStorage.getItem('ff_env_type') || 'conda';
+  if (ffEnvTypeSelect) ffEnvTypeSelect.value = savedEnvType;
+  toggleEnvFields(savedEnvType);
+
+  const savedCondaPath = localStorage.getItem('ff_conda_path') || 'C:\\ProgramData\\miniconda3\\Scripts\\conda.exe';
+  if (ffCondaPathInput) ffCondaPathInput.value = savedCondaPath;
+
+  const savedCondaEnv = localStorage.getItem('ff_conda_env') || 'facefusion';
+  if (condaEnvInput) condaEnvInput.value = savedCondaEnv;
+
+  const savedFolder = localStorage.getItem('ff_folder_path') || 'C:\\facefusion';
+  if (ffFolderInput) ffFolderInput.value = savedFolder;
+
+  const savedPython = localStorage.getItem('ff_python_path') || 'C:\\facefusion\\.venv\\Scripts\\python.exe';
+  if (ffPythonInput) ffPythonInput.value = savedPython;
+
+  const savedProvider = localStorage.getItem('ff_execution_provider') || 'cuda';
+  if (selectProvider) selectProvider.value = savedProvider;
+
+  // Processors checkboxes
+  if (cbSwapper) cbSwapper.checked = localStorage.getItem('ff_proc_swapper') !== 'false';
+  if (cbEnhancer) cbEnhancer.checked = localStorage.getItem('ff_proc_enhancer') === 'true';
+  if (cbLipSyncer) cbLipSyncer.checked = localStorage.getItem('ff_proc_lip-syncer') === 'true';
+
+  // Load new settings
+  const savedSwapperModel = localStorage.getItem('ff_swapper_model') || 'inswapper_128';
+  if (swapperModelSelect) swapperModelSelect.value = savedSwapperModel;
+
+  const savedPixelBoost = localStorage.getItem('ff_swapper_pixel_boost') || '';
+  if (swapperPixelBoostSelect) swapperPixelBoostSelect.value = savedPixelBoost;
+
+  const savedWeight = localStorage.getItem('ff_swapper_weight') || '1.0';
+  if (swapperWeightRange) swapperWeightRange.value = savedWeight;
+  if (swapperWeightNumber) swapperWeightNumber.value = savedWeight;
+
+  const savedSelectorMode = localStorage.getItem('ff_selector_mode') || 'reference';
+  if (selectorModeSelect) selectorModeSelect.value = savedSelectorMode;
+
+  const savedSelectorOrder = localStorage.getItem('ff_selector_order') || 'large-small';
+  if (selectorOrderSelect) selectorOrderSelect.value = savedSelectorOrder;
+
+  // Persist settings changes
+  if (ffEnvTypeSelect) {
+    ffEnvTypeSelect.addEventListener('change', () => {
+      const val = ffEnvTypeSelect.value;
+      localStorage.setItem('ff_env_type', val);
+      toggleEnvFields(val);
+    });
+  }
+  if (ffCondaPathInput) {
+    ffCondaPathInput.addEventListener('change', () => {
+      localStorage.setItem('ff_conda_path', ffCondaPathInput.value.trim());
+    });
+  }
+  if (condaEnvInput) {
+    condaEnvInput.addEventListener('change', () => {
+      localStorage.setItem('ff_conda_env', condaEnvInput.value.trim());
+    });
+  }
+  if (ffFolderInput) {
+    ffFolderInput.addEventListener('change', () => {
+      localStorage.setItem('ff_folder_path', ffFolderInput.value.trim());
+    });
+  }
+  if (ffPythonInput) {
+    ffPythonInput.addEventListener('change', () => {
+      localStorage.setItem('ff_python_path', ffPythonInput.value.trim());
+    });
+  }
+  if (selectProvider) {
+    selectProvider.addEventListener('change', () => {
+      localStorage.setItem('ff_execution_provider', selectProvider.value);
+    });
+  }
+  if (cbSwapper) cbSwapper.addEventListener('change', () => localStorage.setItem('ff_proc_swapper', cbSwapper.checked));
+  if (cbEnhancer) cbEnhancer.addEventListener('change', () => localStorage.setItem('ff_proc_enhancer', cbEnhancer.checked));
+  if (cbLipSyncer) cbLipSyncer.addEventListener('change', () => localStorage.setItem('ff_proc_lip-syncer', cbLipSyncer.checked));
+
+  // Add auto-save event listeners for new settings
+  if (swapperModelSelect) {
+    swapperModelSelect.addEventListener('change', () => {
+      localStorage.setItem('ff_swapper_model', swapperModelSelect.value);
+    });
+  }
+  if (swapperPixelBoostSelect) {
+    swapperPixelBoostSelect.addEventListener('change', () => {
+      localStorage.setItem('ff_swapper_pixel_boost', swapperPixelBoostSelect.value);
+    });
+  }
+  if (selectorModeSelect) {
+    selectorModeSelect.addEventListener('change', () => {
+      localStorage.setItem('ff_selector_mode', selectorModeSelect.value);
+    });
+  }
+  if (selectorOrderSelect) {
+    selectorOrderSelect.addEventListener('change', () => {
+      localStorage.setItem('ff_selector_order', selectorOrderSelect.value);
+    });
+  }
+
+  // Weight synchronization and persistence
+  if (swapperWeightRange && swapperWeightNumber) {
+    swapperWeightRange.addEventListener('input', () => {
+      swapperWeightNumber.value = swapperWeightRange.value;
+      localStorage.setItem('ff_swapper_weight', swapperWeightRange.value);
+    });
+    swapperWeightNumber.addEventListener('input', () => {
+      let val = parseFloat(swapperWeightNumber.value);
+      if (isNaN(val)) val = 1.0;
+      if (val < 0) val = 0;
+      if (val > 1) val = 1;
+      // Round to nearest 0.05
+      val = Math.round(val / 0.05) * 0.05;
+      val = parseFloat(val.toFixed(2));
+      swapperWeightRange.value = val;
+      localStorage.setItem('ff_swapper_weight', String(val));
+    });
+  }
+  if (cbLipSyncer) cbLipSyncer.addEventListener('change', () => localStorage.setItem('ff_proc_lip-syncer', cbLipSyncer.checked));
+
+  // Browse Directory / Executable Buttons
+  if (btnSelectFFFolder && ffFolderInput) {
+    btnSelectFFFolder.addEventListener('click', async () => {
+      const result = await window.api.selectOutputFolder(ffFolderInput.value.trim());
+      if (result) {
+        ffFolderInput.value = result;
+        localStorage.setItem('ff_folder_path', result);
+      }
+    });
+  }
+
+  if (btnSelectFFPython && ffPythonInput) {
+    btnSelectFFPython.addEventListener('click', async () => {
+      const result = await window.api.selectPythonExe(getDirectoryOfFile(ffPythonInput.value.trim()));
+      if (result) {
+        ffPythonInput.value = result;
+        localStorage.setItem('ff_python_path', result);
+      }
+    });
+  }
+
+  if (btnSelectFFCondaPath && ffCondaPathInput) {
+    btnSelectFFCondaPath.addEventListener('click', async () => {
+      const result = await window.api.selectCondaExe(getDirectoryOfFile(ffCondaPathInput.value.trim()));
+      if (result) {
+        ffCondaPathInput.value = result;
+        localStorage.setItem('ff_conda_path', result);
+      }
+    });
+  }
+
+  // Load last selected files from local storage if they still exist
+  const savedSource = localStorage.getItem('ff_source_path') || '';
+  if (savedSource) {
+    window.api.checkFileExists({ folderPath: '', filename: savedSource }).then(exists => {
+      if (exists) {
+        ffSourcePath = savedSource;
+        if (sourcePathDisplay) sourcePathDisplay.value = savedSource;
+        if (sourcePreview) {
+          sourcePreview.src = getLocalFileUrl(savedSource);
+          sourcePreview.classList.remove('hidden');
+        }
+        if (sourcePlaceholder) sourcePlaceholder.classList.add('hidden');
+      }
+    });
+  }
+
+  const savedTarget = localStorage.getItem('ff_target_path') || '';
+  if (savedTarget) {
+    window.api.checkFileExists({ folderPath: '', filename: savedTarget }).then(exists => {
+      if (exists) {
+        ffTargetPath = savedTarget;
+        if (targetPathDisplay) targetPathDisplay.value = savedTarget;
+        
+        const ext = savedTarget.split('.').pop().toLowerCase();
+        const isVideo = ['mp4', 'avi', 'mkv', 'mov', 'webm'].includes(ext);
+        
+        if (isVideo) {
+          if (targetPreviewVid) {
+            targetPreviewVid.src = getLocalFileUrl(savedTarget);
+            targetPreviewVid.classList.remove('hidden');
+          }
+          if (targetPreviewImg) targetPreviewImg.classList.add('hidden');
+        } else {
+          if (targetPreviewImg) {
+            targetPreviewImg.src = getLocalFileUrl(savedTarget);
+            targetPreviewImg.classList.remove('hidden');
+          }
+          if (targetPreviewVid) targetPreviewVid.classList.add('hidden');
+        }
+        if (targetPlaceholder) targetPlaceholder.classList.add('hidden');
+      }
+    });
+  }
+
+  // 2. Select Source File Dialog
+  if (btnSelectSource) {
+    btnSelectSource.addEventListener('click', async () => {
+      try {
+        const fileData = await window.api.selectImageFile(getDirectoryOfFile(ffSourcePath));
+        if (fileData) {
+          ffSourcePath = fileData.filePath;
+          if (sourcePathDisplay) sourcePathDisplay.value = fileData.filePath;
+          localStorage.setItem('ff_source_path', fileData.filePath);
+          
+          if (sourcePreview) {
+            sourcePreview.src = getLocalFileUrl(fileData.filePath);
+            sourcePreview.classList.remove('hidden');
+          }
+          if (sourcePlaceholder) sourcePlaceholder.classList.add('hidden');
+        }
+      } catch (err) {
+        console.error('Failed to select Facefusion source:', err);
+      }
+    });
+  }
+
+  // 3. Select Target File Dialog
+  if (btnSelectTarget) {
+    btnSelectTarget.addEventListener('click', async () => {
+      try {
+        const fileData = await window.api.selectFFTargetFile(getDirectoryOfFile(ffTargetPath));
+        if (fileData) {
+          ffTargetPath = fileData.filePath;
+          if (targetPathDisplay) targetPathDisplay.value = fileData.filePath;
+          localStorage.setItem('ff_target_path', fileData.filePath);
+
+          const ext = fileData.filePath.split('.').pop().toLowerCase();
+          const isVideo = ['mp4', 'avi', 'mkv', 'mov', 'webm'].includes(ext);
+
+          if (isVideo) {
+            if (targetPreviewVid) {
+              targetPreviewVid.src = getLocalFileUrl(fileData.filePath);
+              targetPreviewVid.classList.remove('hidden');
+            }
+            if (targetPreviewImg) targetPreviewImg.classList.add('hidden');
+          } else {
+            if (targetPreviewImg) {
+              targetPreviewImg.src = getLocalFileUrl(fileData.filePath);
+              targetPreviewImg.classList.remove('hidden');
+            }
+            if (targetPreviewVid) targetPreviewVid.classList.add('hidden');
+          }
+          if (targetPlaceholder) targetPlaceholder.classList.add('hidden');
+        }
+      } catch (err) {
+        console.error('Failed to select Facefusion target:', err);
+      }
+    });
+  }
+
+  // 4. Console log handlers
+  if (btnClearConsole) {
+    btnClearConsole.addEventListener('click', () => {
+      if (consoleLogs) consoleLogs.textContent = '';
+    });
+  }
+
+  // Register Electron IPC listeners for Facefusion
+  if (window.api && typeof window.api.onFacefusionLog === 'function') {
+    window.api.onFacefusionLog((log) => {
+      if (consoleLogs) {
+        consoleLogs.textContent += log.text;
+        // Auto scroll to bottom
+        const parent = consoleLogs.parentElement;
+        if (parent) {
+          parent.scrollTop = parent.scrollHeight;
+        }
+      }
+    });
+  }
+
+  if (window.api && typeof window.api.onFacefusionProgress === 'function') {
+    window.api.onFacefusionProgress(({ percent }) => {
+      if (progressText) progressText.textContent = `${percent}%`;
+      if (progressFill) progressFill.style.width = `${percent}%`;
+    });
+  }
+
+  // 5. Run Facefusion Task
+  if (btnRun) {
+    btnRun.addEventListener('click', async () => {
+      const envType = ffEnvTypeSelect ? ffEnvTypeSelect.value : 'conda';
+      const condaEnvName = condaEnvInput ? condaEnvInput.value.trim() : 'facefusion';
+      const condaPath = ffCondaPathInput ? ffCondaPathInput.value.trim() : '';
+      const folderPath = ffFolderInput.value.trim();
+      const pythonPath = ffPythonInput.value.trim();
+
+      if (window.api && typeof window.api.logDebug === 'function') {
+        window.api.logDebug({ message: `ff-run-click: envType=${envType}, condaEnvName=${condaEnvName}, condaPath=${condaPath}, folderPath=${folderPath}, pythonPath=${pythonPath}` });
+      }
+
+      const showError = (title, msg) => {
+        facefusionQueue = []; // Clear queue on error
+        showToast(title, msg, 'error');
+        if (consoleLogs) {
+          consoleLogs.textContent = `[${title}] ${msg}\n`;
+        }
+      };
+
+      const showWarning = (title, msg) => {
+        facefusionQueue = []; // Clear queue on warning
+        showToast(title, msg, 'warning');
+        if (consoleLogs) {
+          consoleLogs.textContent = `[${title}] ${msg}\n`;
+        }
+      };
+
+      if (envType === 'conda') {
+        if (!folderPath || !condaEnvName || !condaPath) {
+          showError('Configuration Error', 'Please enter a valid Facefusion folder, Conda path, and environment name.');
+          return;
+        }
+      } else {
+        if (!folderPath || !pythonPath) {
+          showError('Configuration Error', 'Please enter valid Facefusion folder and Python paths.');
+          return;
+        }
+      }
+
+      // Validate paths exist
+      const folderExists = await window.api.checkFileExists({ folderPath: '', filename: folderPath });
+      if (!folderExists) {
+        showError('Directory Not Found', `Facefusion directory was not found at: ${folderPath}\n\nPlease configure or browse to a valid folder.`);
+        return;
+      }
+
+      if (envType === 'conda') {
+        if (condaPath !== 'conda') {
+          const condaExists = await window.api.checkFileExists({ folderPath: '', filename: condaPath });
+          if (!condaExists) {
+            showError('Conda Executable Not Found', `Conda executable was not found at: ${condaPath}\n\nPlease click 'Browse' and select the correct conda.exe.`);
+            return;
+          }
+        }
+      } else {
+        const pythonExists = await window.api.checkFileExists({ folderPath: '', filename: pythonPath });
+        if (!pythonExists) {
+          showError('Python Not Found', `Python executable was not found at: ${pythonPath}\n\nPlease click 'Browse' and select the correct python.exe.`);
+          return;
+        }
+      }
+      if (!ffSourcePath) {
+        showWarning('Source Missing', 'Please select a source face image.');
+        return;
+      }
+      if (!ffTargetPath) {
+        showWarning('Target Missing', 'Please select a target image or video.');
+        return;
+      }
+
+      // Compute output file path:
+      // If outputFolderPath (the main app output setting) is configured, save there.
+      // Else, save in the same directory as the target media file.
+      const targetExt = ffTargetPath.split('.').pop();
+      const targetName = ffTargetPath.split(/[\\/]/).pop().replace(/\.[^/.]+$/, '');
+      
+      let outDir = outputFolderPath;
+      if (!outDir) {
+        // Fallback to target media directory
+        outDir = ffTargetPath.substring(0, ffTargetPath.lastIndexOf('\\'));
+        if (!outDir) {
+          outDir = ffTargetPath.substring(0, ffTargetPath.lastIndexOf('/'));
+        }
+      }
+
+      let index = 1;
+      let outputFilename = '';
+      let outPath = '';
+      let exists = true;
+
+      while (exists) {
+        const indexStr = String(index).padStart(2, '0');
+        outputFilename = `${targetName}_facefusion_${indexStr}.${targetExt}`;
+        outPath = `${outDir}\\${outputFilename}`;
+        exists = await window.api.checkFileExists({ folderPath: '', filename: outPath });
+        if (exists) {
+          index++;
+        }
+      }
+      
+      ffLastOutputPath = outPath;
+
+      // Collect active processors
+      const processors = [];
+      if (cbSwapper && cbSwapper.checked) processors.push('face_swapper');
+      if (cbEnhancer && cbEnhancer.checked) processors.push('face_enhancer');
+      if (cbLipSyncer && cbLipSyncer.checked) processors.push('lip_syncer');
+
+      if (processors.length === 0) {
+        showWarning('Processors Missing', 'Please select at least one frame processor (e.g. face_swapper).');
+        return;
+      }
+
+      const executionProvider = selectProvider ? selectProvider.value : 'cuda';
+
+      // Reset and prepare UI
+      if (btnRun) btnRun.disabled = true;
+      if (btnStop) {
+        btnStop.disabled = false;
+        btnStop.classList.remove('btn-disabled');
+      }
+      if (statusText) statusText.textContent = 'Running...';
+      if (progressText) progressText.textContent = '0%';
+      if (progressFill) progressFill.style.width = '0%';
+      if (consoleLogs) consoleLogs.textContent = 'Initializing Facefusion headless process...\n';
+      
+      // Hide previous results
+      if (outputEmpty) outputEmpty.classList.remove('hidden');
+      if (outputImgContainer) outputImgContainer.classList.add('hidden');
+      if (outputVidContainer) outputVidContainer.classList.add('hidden');
+      if (btnOpenViewer) btnOpenViewer.disabled = true;
+
+      const faceSwapperModel = swapperModelSelect ? swapperModelSelect.value : 'inswapper_128';
+      const faceSwapperPixelBoost = swapperPixelBoostSelect ? swapperPixelBoostSelect.value : '';
+      const faceSwapperWeight = swapperWeightNumber ? parseFloat(swapperWeightNumber.value) : 1.0;
+      const faceSelectorMode = selectorModeSelect ? selectorModeSelect.value : 'reference';
+      const faceSelectorOrder = selectorOrderSelect ? selectorOrderSelect.value : 'large-small';
+
+      let timerInterval = null;
+      try {
+        const startTime = Date.now();
+        if (timeText) timeText.textContent = '0s';
+        timerInterval = setInterval(() => {
+          const elapsedMs = Date.now() - startTime;
+          if (timeText) timeText.textContent = formatJobTime(elapsedMs);
+        }, 100);
+
+        const result = await window.api.runFacefusion({
+          envType,
+          condaEnvName,
+          condaPath,
+          facefusionPath: folderPath,
+          pythonPath,
+          sourcePath: ffSourcePath,
+          targetPath: ffTargetPath,
+          outputPath: outPath,
+          processors,
+          executionProviders: [executionProvider],
+          faceSwapperModel,
+          faceSwapperPixelBoost,
+          faceSwapperWeight,
+          faceSelectorMode,
+          faceSelectorOrder
+        });
+
+        if (timerInterval) clearInterval(timerInterval);
+        const elapsedTotalMs = Date.now() - startTime;
+        if (timeText) timeText.textContent = formatJobTime(elapsedTotalMs);
+
+        // Restore UI actions
+        if (btnRun) btnRun.disabled = false;
+        if (btnStop) {
+          btnStop.disabled = true;
+          btnStop.classList.add('btn-disabled');
+        }
+        checkAndProcessFacefusionQueue();
+
+        if (result.ok) {
+          if (statusText) statusText.textContent = 'Finished';
+          if (progressText) progressText.textContent = '100%';
+          if (progressFill) progressFill.style.width = '100%';
+          showToast('Success', `Task completed! Output saved to: ${outputFilename}`, 'success');
+
+          // Load preview
+          if (outputEmpty) outputEmpty.classList.add('hidden');
+          const isVideo = ['mp4', 'avi', 'mkv', 'mov', 'webm'].includes(targetExt.toLowerCase());
+          
+          if (isVideo) {
+            if (resultVid) {
+              resultVid.src = getLocalFileUrl(outPath);
+              if (outputVidContainer) outputVidContainer.classList.remove('hidden');
+              if (outputImgContainer) outputImgContainer.classList.add('hidden');
+            }
+          } else {
+            if (resultImg) {
+              resultImg.src = getLocalFileUrl(outPath);
+              if (outputImgContainer) outputImgContainer.classList.remove('hidden');
+              if (outputVidContainer) outputVidContainer.classList.add('hidden');
+            }
+          }
+          if (btnOpenViewer) btnOpenViewer.disabled = false;
+        } else {
+          if (statusText) statusText.textContent = 'Failed';
+          showToast('Facefusion Failed', result.error || 'Subprocess exited with an error code.', 'error');
+        }
+      } catch (err) {
+        if (timerInterval) clearInterval(timerInterval);
+        if (btnRun) btnRun.disabled = false;
+        if (btnStop) {
+          btnStop.disabled = true;
+          btnStop.classList.add('btn-disabled');
+        }
+        if (statusText) statusText.textContent = 'Failed';
+        showToast('Process Error', err.message, 'error');
+        checkAndProcessFacefusionQueue();
+      }
+    });
+  }
+
+  // 6. Stop Facefusion Task
+  if (btnStop) {
+    btnStop.addEventListener('click', async () => {
+      try {
+        const result = await window.api.stopFacefusion();
+        if (result.ok) {
+          if (statusText) statusText.textContent = 'Stopped';
+          showToast('Task Stopped', 'Facefusion process terminated by user.', 'info');
+        }
+      } catch (err) {
+        showToast('Error stopping process', err.message, 'error');
+      }
+    });
+  }
+
+  // 7. Open Output Folder Action
+  if (btnOpenFolder) {
+    btnOpenFolder.addEventListener('click', async () => {
+      let folderToOpen = outputFolderPath;
+      if (ffLastOutputPath) {
+        folderToOpen = ffLastOutputPath.substring(0, ffLastOutputPath.lastIndexOf('\\'));
+        if (!folderToOpen) {
+          folderToOpen = ffLastOutputPath.substring(0, ffLastOutputPath.lastIndexOf('/'));
+        }
+      }
+      
+      if (!folderToOpen) {
+        // Fallback to facefusion directory
+        folderToOpen = ffFolderInput.value.trim();
+      }
+
+      if (folderToOpen) {
+        const res = await window.api.openPath({ path: folderToOpen });
+        if (!res.ok) {
+          showToast('Error', res.error || 'Could not open folder', 'error');
+        }
+      } else {
+        showToast('Directory not found', 'No output folder available to open.', 'warning');
+      }
+    });
+  }
+
+  // 8. Open Output in System Viewer
+  if (btnOpenViewer) {
+    btnOpenViewer.addEventListener('click', async () => {
+      if (ffLastOutputPath) {
+        const res = await window.api.openPath({ path: ffLastOutputPath });
+        if (!res.ok) {
+          showToast('Error', res.error || 'Could not open file', 'error');
+        }
+      }
+    });
+  }
+}
+
+function extractSettingsFromImportedJson(importedJson) {
+  const settings = {
+    clipPositive: [],
+    clipNegative: [],
+    qwenPositive: [],
+    qwenNegative: [],
+    imageSlots: []
+  };
+
+  if (Array.isArray(importedJson.nodes)) {
+    const nodes = importedJson.nodes;
+    
+    nodes.forEach(node => {
+      const type = node.type || '';
+      const title = node.title || node.properties?.NodeNameForFN || '';
+      const widgets = node.widgets_values || [];
+
+      if (type === 'CLIPTextEncode' && widgets.length > 0 && typeof widgets[0] === 'string') {
+        const val = widgets[0];
+        const lowerTitle = title.toLowerCase();
+        const isNegative = val.toLowerCase().includes('bad') || 
+                           val.toLowerCase().includes('ugly') || 
+                           val.toLowerCase().includes('nsfw') || 
+                           lowerTitle.includes('negative');
+        if (isNegative) {
+          settings.clipNegative.push(val);
+        } else {
+          settings.clipPositive.push(val);
+        }
+      } else if (type === 'TextEncodeQwenImageEditPlus' && widgets.length > 0 && typeof widgets[0] === 'string') {
+        const val = widgets[0];
+        const lowerTitle = title.toLowerCase();
+        let isNegative = false;
+        if (lowerTitle.includes('negative') || lowerTitle.includes('neg')) {
+          isNegative = true;
+        } else if (lowerTitle.includes('positive') || lowerTitle.includes('postive') || lowerTitle.includes('pos')) {
+          isNegative = false;
+        } else {
+          isNegative = val.trim() === '';
+        }
+        if (isNegative) {
+          settings.qwenNegative.push(val);
+        } else {
+          settings.qwenPositive.push(val);
+        }
+      } else if (type === 'LoadImage' && widgets.length > 0 && typeof widgets[0] === 'string') {
+        settings.imageSlots.push({
+          imageFilename: widgets[0],
+          enabled: true,
+          rotation: 'none',
+          flip: 'none'
+        });
+      }
+    });
+
+    const rotateNodes = nodes.filter(n => n.type === 'ImageRotate');
+    const flipNodes = nodes.filter(n => n.type === 'ImageFlip');
+
+    settings.imageSlots.forEach((slot, idx) => {
+      if (idx < rotateNodes.length) {
+        const rNode = rotateNodes[idx];
+        const widgets = rNode.widgets_values || [];
+        if (widgets.length > 0) {
+          slot.rotation = mapComfyRotationToUi(widgets[0]);
+        }
+      }
+      if (idx < flipNodes.length) {
+        const fNode = flipNodes[idx];
+        const widgets = fNode.widgets_values || [];
+        if (widgets.length > 0) {
+          const rawFlip = widgets[0] || 'none';
+          if (rawFlip.includes('horizontally')) {
+            slot.flip = 'horizontal';
+          } else if (rawFlip.includes('vertically')) {
+            slot.flip = 'vertical';
+          }
+        }
+      }
+    });
+
+  } else {
+    const knownPositiveNodes = new Set();
+    const knownNegativeNodes = new Set();
+
+    const traceConditioning = (startNodeId, visited = new Set()) => {
+      if (!startNodeId || visited.has(startNodeId)) return [];
+      visited.add(startNodeId);
+      const node = importedJson[startNodeId];
+      if (!node) return [];
+      const classType = node.class_type || '';
+      if (classType === 'CLIPTextEncode' || classType === 'TextEncodeQwenImageEditPlus') {
+        return [startNodeId];
+      }
+      let found = [];
+      if (node.inputs) {
+        for (const key in node.inputs) {
+          const val = node.inputs[key];
+          if (Array.isArray(val) && val.length === 2 && typeof val[0] === 'string') {
+            const kLower = key.toLowerCase();
+            if (kLower.includes('conditioning') || 
+                kLower.includes('positive') || 
+                kLower.includes('negative') ||
+                kLower.includes('prompt')) {
+              found = found.concat(traceConditioning(String(val[0]), visited));
+            }
+          }
+        }
+      }
+      return found;
+    };
+
+    for (const nodeId in importedJson) {
+      const node = importedJson[nodeId];
+      if (!node || !node.inputs) continue;
+      const classType = node.class_type || '';
+      const isSampler = classType.includes('Sampler') || classType === 'KSampler' || classType === 'KSamplerAdvanced';
+      if (isSampler) {
+        if (node.inputs.positive && Array.isArray(node.inputs.positive) && node.inputs.positive.length === 2) {
+          const posNodes = traceConditioning(String(node.inputs.positive[0]));
+          posNodes.forEach(id => knownPositiveNodes.add(id));
+        }
+        if (node.inputs.negative && Array.isArray(node.inputs.negative) && node.inputs.negative.length === 2) {
+          const negNodes = traceConditioning(String(node.inputs.negative[0]));
+          negNodes.forEach(id => knownNegativeNodes.add(id));
+        }
+      }
+    }
+
+    for (const nodeId in importedJson) {
+      const node = importedJson[nodeId];
+      if (!node || !node.inputs) continue;
+
+      const classType = node.class_type || '';
+      const nodeTitle = (node._meta && node._meta.title) ? node._meta.title : `${classType} (#${nodeId})`;
+
+      if (classType === 'CLIPTextEncode' && typeof node.inputs.text === 'string') {
+        let isNegative = false;
+        if (knownNegativeNodes.has(nodeId)) {
+          isNegative = true;
+        } else if (knownPositiveNodes.has(nodeId)) {
+          isNegative = false;
+        } else {
+          const val = node.inputs.text;
+          isNegative = val.toLowerCase().includes('bad') || 
+                       val.toLowerCase().includes('ugly') || 
+                       val.toLowerCase().includes('nsfw') || 
+                       nodeTitle.toLowerCase().includes('negative');
+        }
+        if (isNegative) {
+          settings.clipNegative.push(node.inputs.text);
+        } else {
+          settings.clipPositive.push(node.inputs.text);
+        }
+      } else if (classType === 'TextEncodeQwenImageEditPlus' && typeof node.inputs.prompt === 'string') {
+        let isNegative = false;
+        if (knownNegativeNodes.has(nodeId)) {
+          isNegative = true;
+        } else if (knownPositiveNodes.has(nodeId)) {
+          isNegative = false;
+        } else {
+          const val = node.inputs.prompt;
+          const lowerTitle = nodeTitle.toLowerCase();
+          if (lowerTitle.includes('negative') || lowerTitle.includes('neg')) {
+            isNegative = true;
+          } else if (lowerTitle.includes('positive') || lowerTitle.includes('postive') || lowerTitle.includes('pos')) {
+            isNegative = false;
+          } else {
+            isNegative = val.trim() === '';
+          }
+        }
+        if (isNegative) {
+          settings.qwenNegative.push(node.inputs.prompt);
+        } else {
+          settings.qwenPositive.push(node.inputs.prompt);
+        }
+      }
+    }
+
+    const loadImageNodes = {};
+    const rotateNodeForLoad = {};
+    const flipNodeForLoad = {};
+
+    for (const nodeId in importedJson) {
+      const node = importedJson[nodeId];
+      if (!node || !node.inputs) continue;
+      if (node.class_type === 'LoadImage') {
+        loadImageNodes[nodeId] = node;
+      }
+    }
+
+    const loadIds = Object.keys(loadImageNodes);
+    loadIds.sort((a, b) => parseInt(a) - parseInt(b));
+
+    for (const loadId of loadIds) {
+      for (const nodeId in importedJson) {
+        const node = importedJson[nodeId];
+        if (!node || !node.inputs) continue;
+        const imgInput = node.inputs.image;
+        if (Array.isArray(imgInput) && String(imgInput[0]) === loadId) {
+          if (node.class_type === 'ImageRotate') {
+            rotateNodeForLoad[loadId] = nodeId;
+          } else if (node.class_type === 'ImageFlip') {
+            flipNodeForLoad[loadId] = nodeId;
+          }
+        }
+      }
+      const rotateId = rotateNodeForLoad[loadId];
+      if (rotateId) {
+        for (const nodeId in importedJson) {
+          const node = importedJson[nodeId];
+          if (!node || !node.inputs) continue;
+          const imgInput = node.inputs.image;
+          if (Array.isArray(imgInput) && String(imgInput[0]) === rotateId && node.class_type === 'ImageFlip') {
+            flipNodeForLoad[loadId] = nodeId;
+          }
+        }
+      }
+      const flipId = flipNodeForLoad[loadId];
+      if (flipId) {
+        for (const nodeId in importedJson) {
+          const node = importedJson[nodeId];
+          if (!node || !node.inputs) continue;
+          const imgInput = node.inputs.image;
+          if (Array.isArray(imgInput) && String(imgInput[0]) === flipId && node.class_type === 'ImageRotate') {
+            rotateNodeForLoad[loadId] = nodeId;
+          }
+        }
+      }
+    }
+
+    loadIds.forEach((loadId) => {
+      const defaultImage = loadImageNodes[loadId].inputs.image || '';
+      
+      const rotateId = rotateNodeForLoad[loadId];
+      const rawRotation = rotateId ? (importedJson[rotateId].inputs.rotation || 'none') : 'none';
+      const rotation = mapComfyRotationToUi(rawRotation);
+
+      const flipId = flipNodeForLoad[loadId];
+      let flip = 'none';
+      if (flipId && importedJson[flipId]) {
+        const rawFlip = importedJson[flipId].inputs.flip_method || 'none';
+        if (rawFlip.includes('horizontally')) {
+          flip = 'horizontal';
+        } else if (rawFlip.includes('vertically')) {
+          flip = 'vertical';
+        }
+      }
+
+      settings.imageSlots.push({
+        imageFilename: defaultImage,
+        enabled: true,
+        rotation: rotation,
+        flip: flip
+      });
+    });
+  }
+
+  return settings;
+}
+
+function initImportPrompt() {
+  const btnImport = document.getElementById('btn-import-prompt');
+  if (btnImport) {
+    btnImport.addEventListener('click', async () => {
+      if (!currentWorkflow) {
+        alert('Please load a workflow JSON first.');
+        return;
+      }
+      try {
+        const lastPath = localStorage.getItem('comfyui_last_import_prompt_path') || '';
+        const result = await window.api.importPromptFile(lastPath);
+        if (!result) return;
+
+        if (!result.ok) {
+          alert('This file does not contain the required data to be extracted.');
+          return;
+        }
+
+        if (result.filePath) {
+          localStorage.setItem('comfyui_last_import_prompt_path', result.filePath);
+        }
+
+        const settings = extractSettingsFromImportedJson(result.content);
+        
+        const hasPrompts = settings.clipPositive.length > 0 || settings.clipNegative.length > 0 ||
+                           settings.qwenPositive.length > 0 || settings.qwenNegative.length > 0;
+        const hasImages = settings.imageSlots.length > 0;
+        
+        if (!hasPrompts && !hasImages) {
+          alert('This file does not contain the required data to be extracted.');
+          return;
+        }
+
+        applyPreservedSettings(currentWorkflow, settings);
+        
+        localStorage.setItem('comfyui_workflow_json', JSON.stringify(currentWorkflow));
+        
+        generateDynamicParamsUI(currentWorkflow);
+        
+        showToast('Import Success', 'Prompts and image settings imported successfully.', 'success');
+      } catch (err) {
+        console.error('Import error:', err);
+        alert('This file does not contain the required data to be extracted.');
+      }
+    });
+  }
+}
+
+
