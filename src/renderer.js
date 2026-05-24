@@ -2821,6 +2821,10 @@ const WEB_UI_WIDGET_SCHEMA = {
   'TextEncodeQwenImageEditPlus':   { 0: 'prompt' },
   'LoadImage':                     { 0: 'image' },
   'ImageRotate':                   { 0: 'rotation' },
+  'UnetLoaderGGUF':                { 0: 'unet_name' },
+  'CLIPLoader':                    { 0: 'clip_name' },
+  'CLIPLoaderGGUF':                { 0: 'clip_name' },
+  'VAELoader':                     { 0: 'vae_name' }
 };
 
 // Clone the web-UI format workflow and update widget_values from current UI / lastSubmittedWorkflow
