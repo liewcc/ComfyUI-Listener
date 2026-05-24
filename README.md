@@ -1,60 +1,89 @@
-# ComfyUI Listener (便携独立环境版)
+# ComfyUI Listener (Portable & Independent Environment Version)
 
-这是一个为 ComfyUI 监听器配置的**全便携、全独立**的 Python 与 Git 运行环境。该项目**不依赖**用户本地电脑上是否安装了 Python 或 Git，所有运行所需环境均会在首次运行时自动下载并配置在项目目录内的 `.venv` 文件夹中。
+An Electron-based desktop application designed for ComfyUI API control and Face Fusion automation. This repository features a **completely portable and independent** python and node.js runtime environment. It **does not require** pre-installed Python, Node.js, or Git on the host system. All necessary environments are automatically downloaded, configured, and isolated within the project directory upon first setup.
 
-## 📁 目录结构
+---
+
+## 📁 Directory Structure
 
 ```text
 ComfyUI Listener/
-├── .venv/                # 自动下载的独立便携式 Python 运行环境 (Python 3.10.11)
-├── git/                  # 自动下载的独立便携式 Git 运行环境 (MinGit)
-├── requirements.txt      # 依赖包配置文件
-├── main.py               # 项目入口 Python 脚本
-├── setup.bat / .ps1      # 一键环境配置脚本 (CMD / PowerShell)
-├── run.bat / .ps1        # 一键运行脚本 (CMD / PowerShell)
-└── .gitignore            # Git 忽略配置
+├── .node_venv/           # Auto-downloaded portable Node.js runtime (v20.11.1)
+├── .venv/                # Auto-downloaded portable Python runtime (v3.10.11)
+├── git/                  # Auto-downloaded portable Git runtime (MinGit)
+├── src/                  # Electron application source code (HTML, CSS, JS)
+│   ├── main.js           # Electron main process
+│   ├── preload.js        # Electron preload script
+│   ├── renderer.js       # Electron renderer process (UI & automation logic)
+│   ├── index.html        # Main user interface
+│   └── style.css         # Modern, high-performance UI stylesheet
+├── workflow/             # Tracked reference ComfyUI workflow JSON templates
+├── requirements.txt      # Python dependencies list
+├── package.json          # Node.js dependencies list (Electron, etc.)
+├── setup.bat / .ps1      # One-click Python & Git setup scripts (CMD / PowerShell)
+├── setup_node.bat / .ps1 # One-click Node.js & Electron setup scripts (CMD / PowerShell)
+├── run.bat / .ps1        # Run script for Python CLI mode (CMD / PowerShell)
+├── run_electron.bat / .ps1 # Run script for the Electron GUI desktop app (CMD / PowerShell)
+└── .gitignore            # Git exclusion patterns
 ```
 
 ---
 
-## 🚀 快速使用
+## 🚀 Quick Start
 
-### 1. 一键初始化环境
-双击运行 **`setup.bat`**（或者在 PowerShell 中执行 `.\setup.ps1`）。
-该脚本会自动执行以下步骤：
-* **下载独立 Python**：从 python.org 官方下载 Python 3.10.11 的 Windows 便携式免安装包（Zip），并解压到 `.venv/` 文件夹下。
-* **配置导入路径**：修改 `.venv` 的路径文件，使其可以加载第三方模块。
-* **安装独立 Pip**：自动下载并安装独立版本的 Pip 包管理器。
-* **下载独立 Git**：从 Github 官方下载轻量便携式 Git (`MinGit`)，并解压到 `git/` 文件夹下。
-* **安装第三方依赖**：使用刚刚配置完毕的本地 Python 和 Pip，自动安装 `requirements.txt` 中配置的所有第三方包。
+To set up and run the application, follow these two setup steps to configure the isolated runtimes:
 
-### 2. 运行脚本
-双击运行 **`run.bat`**（或者在 PowerShell 中执行 `.\run.ps1`）。
-* 该脚本运行后，会临时将本地的 `.venv` 以及 `git/cmd` 路径注入到环境变量 `PATH` 中。
-* 这样即使您的电脑没装过 Git 或 Python，您的 Python 脚本或相关第三方库（如 GitPython 等）在运行期间依然可以完美调用本地的 `git` 命令和 `python` 可执行程序。
-* 支持传参：在命令行中，您可以像这样传参：`.\run.bat --arg1 value1`。
+### 1. Initialize Python & Git Environment
+Double-click and run **`setup.bat`** (or execute `.\setup.ps1` in a PowerShell terminal).
+This script automates:
+* **Portable Python**: Downloads the Python 3.10.11 Windows portable package from python.org and extracts it into `.venv/`.
+* **Path & Loader Config**: Modifies the Python path files so that local dependencies can be loaded properly.
+* **Pip Installer**: Downloads and installs a local `pip` package manager inside the sandbox.
+* **Portable Git**: Downloads the lightweight portable Git (`MinGit`) from GitHub and extracts it to the `git/` folder.
+* **Python Dependencies**: Uses the local sandbox pip to install all packages specified in `requirements.txt`.
+
+### 2. Initialize Node.js & Electron Environment
+Double-click and run **`setup_node.bat`** (or execute `.\setup_node.ps1` in PowerShell).
+This script automates:
+* **Portable Node.js**: Downloads Node.js v20.11.1 Windows portable binary zip and extracts it to `.node_venv/`.
+* **Sandbox Configuration**: Sets the local `npm` prefix and cache directories inside `.node_venv/npm_global` to avoid interfering with global system configurations.
+* **App Dependencies**: Automatically installs Electron and all node modules declared in `package.json`.
 
 ---
 
-## 🛠️ 进阶操作
+## 💻 Running the Application
 
-### 添加/修改第三方依赖包
-1. 打开 `requirements.txt`。
-2. 在新行中输入您需要的库名称（可带版本号），例如：
+### Launching the Electron Desktop GUI
+Double-click **`run_electron.bat`** (or execute `.\run_electron.ps1` in PowerShell).
+* This injects the sandbox paths (`.node_venv`, `git`, and `.venv`) temporarily into the session's environment variable `PATH`.
+* Even if your Windows host has no global Git, Node.js, or Python, the desktop GUI will launch and run seamlessly.
+* This interface lets you control ComfyUI, configure workflow templates, load API/WebUI parameters, monitor outputs, and automate Face Fusion face-swapping steps.
+
+### Running Python CLI Mode (Optional)
+Double-click **`run.bat`** (or execute `.\run.ps1` in PowerShell).
+* Runs the python entrypoint `main.py` using the isolated sandbox `.venv` environment.
+* Supports arguments forwarding, e.g.: `.\run.bat --arg1 value1`.
+
+---
+
+## 🛠️ Advanced Operations
+
+### Managing Python Dependencies
+1. Open `requirements.txt`.
+2. Add your required package names (with optional version tags), e.g.:
    ```text
    requests>=2.31.0
    websocket-client>=1.6.0
    ```
-3. 重新双击运行 `setup.bat` 即可自动补充安装新的依赖包。
+3. Re-run `setup.bat` to automatically install the new dependencies.
 
-### 手动在独立环境终端中执行命令
-如果您需要使用本地安装的独立 pip、python 进行一些手动调试，可以手动在项目根目录下打开命令行/终端，执行以下操作：
-
-* **使用独立 Python 执行命令**：
+### Executing Commands in the Sandbox Terminal
+If you need to manually invoke the isolated runtime command-line for testing or debugging:
+* **Run commands using isolated Python**:
   ```cmd
   .venv\python.exe -m <Command>
   ```
-* **使用独立 Pip 安装单个库**：
+* **Install a package directly using isolated Pip**:
   ```cmd
   .venv\python.exe -m pip install <PackageName>
   ```
