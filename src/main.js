@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -97,6 +97,42 @@ function extractPngTextChunks(pngBuf) {
 }
 
 let mainWindow;
+let tray = null;
+let isQuitting = false;
+let minimizeToTray = false;
+
+function createTray() {
+  const iconPath = path.join(__dirname, 'icon.png');
+  if (!fs.existsSync(iconPath)) {
+    console.error('Tray icon path does not exist:', iconPath);
+    return;
+  }
+  tray = new Tray(iconPath);
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: 'Show Window',
+      click: () => {
+        if (mainWindow) mainWindow.show();
+      }
+    },
+    { type: 'separator' },
+    {
+      label: 'Exit',
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      }
+    }
+  ]);
+  tray.setToolTip('ComfyUI Listener Control Center');
+  tray.setContextMenu(contextMenu);
+
+  tray.on('double-click', () => {
+    if (mainWindow) {
+      mainWindow.show();
+    }
+  });
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -130,6 +166,13 @@ function createWindow() {
     // mainWindow.webContents.openDevTools({ mode: 'detach' });
   });
 
+  mainWindow.on('close', (e) => {
+    if (!isQuitting && minimizeToTray) {
+      e.preventDefault();
+      mainWindow.hide();
+    }
+  });
+
   mainWindow.on('closed', function () {
     mainWindow = null;
   });
@@ -137,14 +180,23 @@ function createWindow() {
 
 app.whenReady().then(() => {
   createWindow();
+  createTray();
 
   app.on('activate', function () {
     if (mainWindow === null) createWindow();
   });
 });
 
+app.on('before-quit', () => {
+  isQuitting = true;
+});
+
 app.on('window-all-closed', function () {
   if (process.platform !== 'darwin') app.quit();
+});
+
+ipcMain.on('update-minimize-to-tray', (event, enabled) => {
+  minimizeToTray = enabled;
 });
 
 // Helper to find the matching sister workflow file (api <=> webui)
@@ -225,6 +277,88 @@ ipcMain.handle('select-workflow-file', async () => {
     throw new Error('Failed to read or parse workflow JSON: ' + err.message);
   }
 });
+
+// Select destination path to save the combined workflow JSON file
+ipcMain.handle('select-save-workflow-file', async (event, defaultPath) => {
+  const defaultDir = defaultPath && fs.existsSync(path.dirname(defaultPath))
+    ? path.dirname(defaultPath)
+    : path.join(app.getAppPath(), 'workflow');
+  const defaultName = defaultPath ? path.basename(defaultPath) : 'combined_workflow.json';
+  
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save Combined Workflow JSON File',
+    defaultPath: path.join(defaultDir, defaultName),
+    filters: [
+      { name: 'JSON Files', extensions: ['json'] }
+    ]
+  });
+
+  if (result.canceled || !result.filePath) {
+    return null;
+  }
+  return result.filePath;
+});
+
+// Validate and merge WebUI and API workflows into a single listener combined JSON file
+ipcMain.handle('combine-workflows', async (event, { webuiPath, apiPath, outputPath }) => {
+  try {
+    if (!webuiPath || !fs.existsSync(webuiPath)) {
+      return { ok: false, error: 'WebUI workflow file path is invalid or does not exist.' };
+    }
+    if (!apiPath || !fs.existsSync(apiPath)) {
+      return { ok: false, error: 'API workflow file path is invalid or does not exist.' };
+    }
+    if (!outputPath) {
+      return { ok: false, error: 'Output path is not specified.' };
+    }
+
+    const webuiContent = fs.readFileSync(webuiPath, 'utf8');
+    const apiContent = fs.readFileSync(apiPath, 'utf8');
+
+    let webuiJson, apiJson;
+    try {
+      webuiJson = JSON.parse(webuiContent);
+    } catch (e) {
+      return { ok: false, error: 'Failed to parse WebUI workflow file as JSON.' };
+    }
+
+    try {
+      apiJson = JSON.parse(apiContent);
+    } catch (e) {
+      return { ok: false, error: 'Failed to parse API workflow file as JSON.' };
+    }
+
+    // Validate ComfyUI format structures
+    if (!webuiJson.nodes || !Array.isArray(webuiJson.nodes)) {
+      return { ok: false, error: 'Selected WebUI file lacks a "nodes" list. Is it in WebUI format?' };
+    }
+
+    const apiKeys = Object.keys(apiJson);
+    const numericKeys = apiKeys.filter(k => !isNaN(parseInt(k)));
+    if (numericKeys.length === 0) {
+      return { ok: false, error: 'Selected API file lacks numeric node IDs. Is it in API format?' };
+    }
+
+    const combined = {
+      type: 'comfyui_listener_combined',
+      version: '1.0',
+      timestamp: new Date().toISOString(),
+      webui: webuiJson,
+      api: apiJson
+    };
+
+    const outputDir = path.dirname(outputPath);
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+    }
+
+    fs.writeFileSync(outputPath, JSON.stringify(combined, null, 2), 'utf8');
+    return { ok: true, filePath: outputPath, fileName: path.basename(outputPath), content: combined };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 
 // Select an image file for LoadImage node
 ipcMain.handle('select-image-file', async (event, defaultPath) => {

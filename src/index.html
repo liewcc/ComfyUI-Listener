@@ -56,6 +56,35 @@
       
 
 
+      <!-- Qwen Canvas Settings Card -->
+      <div class="connection-card" id="sidebar-qwen-canvas-card" style="display: none; margin-top: 12px;">
+        <div class="card-header">
+          <h3>Qwen Canvas Settings</h3>
+        </div>
+        <div class="card-body">
+          <div class="checkbox-row" style="margin-bottom: 12px;">
+            <input type="checkbox" id="qwen-auto-aspect-ratio" class="autosave-checkbox">
+            <label for="qwen-auto-aspect-ratio">Auto-detect Ratio from Slot</label>
+          </div>
+          <div id="qwen-auto-aspect-ratio-settings-group" style="display: none; margin-top: 4px; margin-bottom: 12px; padding-left: 22px;">
+            <div class="input-group" style="margin-bottom: 0;">
+              <label for="qwen-auto-aspect-ratio-slot">Target Slot</label>
+              <select id="qwen-auto-aspect-ratio-slot">
+                <option value="0">Slot 1 Reference Image</option>
+                <option value="1">Slot 2 Reference Image</option>
+                <option value="2">Slot 3 Reference Image</option>
+              </select>
+            </div>
+          </div>
+          <div class="input-group" id="qwen-aspect-ratio-container" style="margin-bottom: 0;">
+            <label for="sidebar-qwen-aspect-ratio">Aspect Ratio</label>
+            <select id="sidebar-qwen-aspect-ratio">
+              <!-- Dynamically synchronized options -->
+            </select>
+          </div>
+        </div>
+      </div>
+
       <!-- Automation Settings -->
       <div class="connection-card automation-card">
         <div class="card-header">
@@ -66,12 +95,27 @@
             <input type="checkbox" id="auto-send-ff" class="autosave-checkbox">
             <label for="auto-send-ff">Send output to Face Fusion</label>
           </div>
+          <div id="auto-send-ff-settings-group" style="display: none; margin-top: 4px; margin-bottom: 12px; padding-left: 22px;">
+            <div class="input-group" style="margin-bottom: 0;">
+              <label for="auto-send-ff-selector-order">Face Selector Order</label>
+              <select id="auto-send-ff-selector-order">
+                <option value="large-small">large-small (Default)</option>
+                <option value="small-large">small-large</option>
+                <option value="left-right">left-right</option>
+                <option value="right-left">right-left</option>
+                <option value="top-bottom">top-bottom</option>
+                <option value="bottom-top">bottom-top</option>
+                <option value="best-worst">best-worst</option>
+                <option value="worst-best">worst-best</option>
+              </select>
+            </div>
+          </div>
           <div class="checkbox-row" style="margin-bottom: 12px;">
             <input type="checkbox" id="auto-watch-folder" class="autosave-checkbox">
             <label for="auto-watch-folder">Watch Folder for auto-run</label>
           </div>
           
-          <div id="watch-folder-settings-group" style="display: none; margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px;">
+          <div id="watch-folder-settings-group" style="display: none; margin-top: 10px; padding-top: 10px;">
             <div class="output-path-container">
               <span class="path-label">Watch Folder:</span>
               <div class="output-path-display" id="watch-path-display" title="Not configured">Not configured</div>
@@ -155,6 +199,19 @@
           </div>
         </div>
       </div>
+
+      <!-- General Settings -->
+      <div class="connection-card general-settings-card">
+        <div class="card-header">
+          <h3>General Settings</h3>
+        </div>
+        <div class="card-body">
+          <div class="checkbox-row" style="margin-bottom: 0;">
+            <input type="checkbox" id="minimize-to-tray" class="autosave-checkbox">
+            <label for="minimize-to-tray">Minimize to Tray on Close</label>
+          </div>
+        </div>
+      </div>
     </aside>
 
     <!-- Main Content Area -->
@@ -191,6 +248,9 @@
               <div class="panel-header">
                 <div class="panel-title-icon image-icon" style="background-color: var(--accent);"></div>
                 <h3>Input Images</h3>
+                <div class="header-actions">
+                  <button id="btn-clear-slots" class="btn btn-mini" title="Clear all slot links and reset rotate/flip states">Clear Slots</button>
+                </div>
                 <span class="badge" id="input-images-count">0 active</span>
               </div>
               <div class="panel-body scrollable">
@@ -224,6 +284,16 @@
               <div class="panel-header">
                 <div class="panel-title-icon monitor-icon"></div>
                 <h3>Execution Monitor</h3>
+                <div class="header-status-indicators" style="display: flex; gap: 12px; align-items: center; margin-left: auto;">
+                  <button id="btn-view-jobs" class="btn btn-ghost btn-mini" style="width: auto; padding: 4px 8px; font-size: 11px; height: 24px; border: 1px solid var(--border); display: flex; align-items: center; gap: 4px; border-radius: 4px;" title="View Job History">
+                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" style="display: block;">
+                      <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <span>Jobs</span>
+                  </button>
+                  <span id="indicator-comfy" class="job-status-badge job-status-pending" style="font-size: 10px; padding: 3px 8px; border-radius: 8px; font-weight: 700; cursor: default;" title="ComfyUI status: Idle">ComfyUI: Idle</span>
+                  <span id="indicator-ff" class="job-status-badge job-status-pending" style="font-size: 10px; padding: 3px 8px; border-radius: 8px; font-weight: 700; cursor: default;" title="Face Fusion status: Idle">Face Fusion: Idle</span>
+                </div>
               </div>
               <div class="panel-body">
                 <div class="progress-details">
@@ -320,27 +390,26 @@
                 <h3>Workflow JSON</h3>
               </div>
               <div class="panel-body">
-                <!-- Row 1: Web UI format (for PNG metadata embedding) -->
-                <div class="wf-row-label">Web UI Format</div>
-                <div class="workflow-file-row">
-                  <input type="text" id="webui-workflow-filename" class="workflow-filename-input"
-                         readonly placeholder="No workflow loaded…">
-                  <button id="btn-load-webui-workflow" class="btn btn-secondary btn-small"
-                          title="Load Web UI format JSON (.json saved normally from ComfyUI)">
-                    <span>Load</span>
-                  </button>
-                </div>
-
-                <!-- Row 2: API format (used to send prompts to ComfyUI) -->
-                <div class="wf-row-label" style="margin-top:10px;">API Format</div>
+                <!-- Single Workflow Row -->
+                <div class="wf-row-label">Workflow File</div>
                 <div class="workflow-file-row">
                   <input type="text" id="workflow-filename" class="workflow-filename-input"
                          readonly placeholder="No workflow loaded…">
-                  <button id="btn-load-workflow" class="btn btn-ghost btn-small"
-                          title="Load API format JSON (Save (API Format) from ComfyUI)">
+                  <button id="btn-load-workflow" class="btn btn-secondary btn-small"
+                          title="Load Combined, API or WebUI workflow JSON file">
                     <span>Load</span>
                   </button>
                 </div>
+                
+                <!-- Hidden elements to maintain compatibility with existing JS selectors -->
+                <input type="hidden" id="webui-workflow-filename">
+                <button id="btn-load-webui-workflow" style="display:none;"></button>
+
+                <!-- Combine Workflows Action Button -->
+                <button id="btn-combine-dialog" class="btn btn-ghost btn-small" style="width: 100%; margin-top: 12px;"
+                        title="Combine WebUI and API workflow files into a single file">
+                  <span>Combine Workflows...</span>
+                </button>
 
                 <!-- Hidden – kept for JS reset logic -->
                 <button id="btn-reload-workflow" style="display:none;"></button>
@@ -758,6 +827,102 @@
       </div>
     </div>
   </div>
+
+  <!-- Combine Workflow Modal -->
+  <div id="combine-modal" class="modal-overlay hidden">
+    <div class="modal-card" style="max-width: 500px; text-align: left; align-items: stretch;">
+      <h3 class="modal-title" style="text-align: center; margin-bottom: 20px;">Combine Workflows</h3>
+      
+      <div class="input-group" style="margin-bottom: 16px; display: flex; flex-direction: column; gap: 6px;">
+        <label style="font-size: 12px; font-weight: 600; color: var(--text-muted);">WebUI Workflow File (.json)</label>
+        <div class="workflow-file-row">
+          <input type="text" id="combine-webui-path" class="workflow-filename-input" readonly placeholder="Select WebUI JSON file...">
+          <button id="btn-browse-combine-webui" class="btn btn-secondary btn-small">Browse...</button>
+        </div>
+      </div>
+      
+      <div class="input-group" style="margin-bottom: 16px; display: flex; flex-direction: column; gap: 6px;">
+        <label style="font-size: 12px; font-weight: 600; color: var(--text-muted);">API Workflow File (.json)</label>
+        <div class="workflow-file-row">
+          <input type="text" id="combine-api-path" class="workflow-filename-input" readonly placeholder="Select API JSON file...">
+          <button id="btn-browse-combine-api" class="btn btn-secondary btn-small">Browse...</button>
+        </div>
+      </div>
+      
+      <div class="input-group" style="margin-bottom: 24px; display: flex; flex-direction: column; gap: 6px;">
+        <label style="font-size: 12px; font-weight: 600; color: var(--text-muted);">Output Combined File (.json)</label>
+        <div class="workflow-file-row">
+          <input type="text" id="combine-output-path" class="workflow-filename-input" readonly placeholder="Select destination combined file...">
+          <button id="btn-browse-combine-output" class="btn btn-secondary btn-small">Browse...</button>
+        </div>
+      </div>
+      
+      <div class="modal-actions" style="flex-direction: row; justify-content: flex-end; gap: 12px;">
+        <button id="btn-combine-cancel" class="btn btn-ghost" style="width: auto;">Cancel</button>
+        <button id="btn-combine-ok" class="btn btn-primary" style="width: auto;">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Jobs History Modal -->
+  <div id="jobs-modal" class="modal-overlay hidden">
+    <div class="modal-card" style="max-width: 1400px; text-align: left; align-items: stretch; width: 98%;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <h3 class="modal-title" style="margin-bottom: 0;">Job Execution History</h3>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <button id="btn-clear-jobs-modal" class="btn btn-ghost btn-mini" style="width: auto; padding: 4px 8px; height: 26px; border: 1px solid var(--border);">Clear History</button>
+          <button id="btn-close-jobs-modal" class="btn btn-ghost btn-mini" style="width: auto; padding: 4px 8px; height: 26px; border: 1px solid var(--border);">Close</button>
+        </div>
+      </div>
+      
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+        <!-- Left Side: ComfyUI Jobs -->
+        <div style="display: flex; flex-direction: column;">
+          <h4 style="font-size: 14px; font-weight: 700; color: hsl(210, 85%, 70%); margin-top: 0; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
+            <span style="width: 8px; height: 8px; border-radius: 50%; background-color: hsl(210, 85%, 70%); display: inline-block;"></span>
+            ComfyUI Generation Jobs
+          </h4>
+          <div class="jobs-table-container" style="max-height: 400px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background-color: var(--bg-secondary);">
+            <table style="width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; table-layout: fixed;">
+              <thead>
+                <tr style="background-color: var(--bg-tertiary); border-bottom: 1px solid var(--border);">
+                  <th style="padding: 10px 14px; color: var(--text-muted); font-weight: 600;">Output Filename</th>
+                  <th style="padding: 10px 14px; color: var(--text-muted); font-weight: 600; width: 110px;">Aspect Ratio</th>
+                  <th style="padding: 10px 14px; color: var(--text-muted); font-weight: 600; width: 100px;">Face Fusion</th>
+                  <th style="padding: 10px 14px; color: var(--text-muted); font-weight: 600; width: 120px;">Selector Order</th>
+                  <th style="padding: 10px 14px; color: var(--text-muted); font-weight: 600; width: 110px;">Status</th>
+                </tr>
+              </thead>
+              <tbody id="jobs-table-body">
+                <!-- Dynamically populated rows go here -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Right Side: Face Fusion Jobs -->
+        <div style="display: flex; flex-direction: column;">
+          <h4 style="font-size: 14px; font-weight: 700; color: hsl(260, 85%, 75%); margin-top: 0; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
+            <span style="width: 8px; height: 8px; border-radius: 50%; background-color: hsl(260, 85%, 75%); display: inline-block;"></span>
+            Face Fusion Process Jobs
+          </h4>
+          <div class="jobs-table-container" style="max-height: 400px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background-color: var(--bg-secondary);">
+            <table style="width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; table-layout: fixed;">
+              <thead>
+                <tr style="background-color: var(--bg-tertiary); border-bottom: 1px solid var(--border);">
+                  <th style="padding: 10px 14px; color: var(--text-muted); font-weight: 600;">Output Filename</th>
+                  <th style="padding: 10px 14px; color: var(--text-muted); font-weight: 600; width: 170px;">Target Face</th>
+                  <th style="padding: 10px 14px; color: var(--text-muted); font-weight: 600; width: 130px;">Selector Order</th>
+                  <th style="padding: 10px 14px; color: var(--text-muted); font-weight: 600; width: 110px;">Status</th>
+                </tr>
+              </thead>
+              <tbody id="ff-jobs-table-body">
+                <!-- Dynamically populated rows go here -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
 
   <script src="renderer.js"></script>
 </body>

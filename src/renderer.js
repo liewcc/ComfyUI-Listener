@@ -57,6 +57,7 @@ let lastSamplerStep = 0;         // Last reported step of the current KSampler n
 let samplerNodeMaxMap = {};       // Maps nodeId -> max steps, discovered from live progress events
 let estimatedSamplerCount = 0;   // Number of sampler nodes in the workflow (used for early estimate)
 let promptSamplerCountsMap = {}; // Maps prompt_id -> estimatedSamplerCount
+let promptJobStates = new Map(); // Maps prompt_id -> { paramValues, imageSlots, workflow }
 
 
 // Helper to map UI rotation ('none', '90', '180', '270') to ComfyUI ImageRotate input ('none', '90 degrees', '180 degrees', '270 degrees')
@@ -112,16 +113,24 @@ async function comfyFetch(path, options = {}) {
 // Helper to clear history for a specific prompt ID when BOTH image save and workflow execution are completed.
 async function checkAndClearComfyHistory(promptId) {
   if (!promptId) return;
-  const clearHistoryCheckbox = document.getElementById('autosave-clear-history');
-  const shouldClear = clearHistoryCheckbox ? clearHistoryCheckbox.checked : false;
-  
+
+  const hasAutoSave = !!outputFolderPath;
+  const isSaved = !hasAutoSave || savedPromptIds.has(promptId);
+  const isCompleted = completedPromptIds.has(promptId);
+
   if (window.api && typeof window.api.logDebug === 'function') {
-    window.api.logDebug({ message: `checkAndClearComfyHistory called: promptId=${promptId}, shouldClear=${shouldClear}, saved=${savedPromptIds.has(promptId)}, completed=${completedPromptIds.has(promptId)}` });
+    window.api.logDebug({ message: `checkAndClearComfyHistory called: promptId=${promptId}, hasAutoSave=${hasAutoSave}, isSaved=${isSaved}, isCompleted=${isCompleted}` });
   }
 
-  if (!shouldClear) return;
+  if (isSaved && isCompleted) {
+    promptJobStates.delete(promptId);
+    savedPromptIds.delete(promptId);
+    completedPromptIds.delete(promptId);
 
-  if (savedPromptIds.has(promptId) && completedPromptIds.has(promptId)) {
+    const clearHistoryCheckbox = document.getElementById('autosave-clear-history');
+    const shouldClear = clearHistoryCheckbox ? clearHistoryCheckbox.checked : false;
+    if (!shouldClear) return;
+
     try {
       let foundInHistory = false;
       let retries = 10; // Max 10 retries (5 seconds total)
@@ -206,13 +215,22 @@ document.addEventListener('DOMContentLoaded', () => {
   initConnection();
   initWorkflowLoader();
   initImportPrompt();
+  initClearSlots();
   initWebUiWorkflowLoader();
+  initCombineWorkflowsDialog();
   initGeneration();
   initOutputSettings();
   initCompareFeature();
   initConnectionModal();
   initFacefusionTab();
   initAutomationSettings();
+  initGeneralSettings();
+  initJobsModal();
+  initQwenAutoAspectControls();
+
+  // Initialize mini status indicators in Execution Monitor
+  if (typeof updateComfyWorkingStatus === 'function') updateComfyWorkingStatus(false);
+  if (typeof updateFFWorkingStatus === 'function') updateFFWorkingStatus(false);
 });
 
 // Helper: Generate UUID for ComfyUI client identification
@@ -520,22 +538,78 @@ function initWorkflowLoader() {
   const btnLoad   = document.getElementById('btn-load-workflow');
   const btnReload = document.getElementById('btn-reload-workflow');
 
-  // Load button — opens file picker for API format
+  // Load button — opens file picker with smart auto-detection (Combined, API, or WebUI)
   if (btnLoad) {
     btnLoad.addEventListener('click', async () => {
       try {
         const fileData = await window.api.selectWorkflowFile();
         if (fileData) {
-          loadWorkflow(fileData.content, fileData.fileName, true);
-          if (fileData.sister) {
-            if (fileData.sister.content.nodes && Array.isArray(fileData.sister.content.nodes)) {
-              applyWebUiWorkflow(fileData.sister.content, fileData.sister.fileName);
-              showToast('Auto-linked Web UI Workflow', `System automatically found and loaded the related Web UI version: ${fileData.sister.fileName}`, 'success');
+          const content = fileData.content;
+          const fileName = fileData.fileName;
+          
+          if (content && content.type === 'comfyui_listener_combined') {
+            // 1. Combined format
+            if (content.webui) {
+              applyWebUiWorkflow(content.webui, fileName + ' (Web UI)');
+            }
+            if (content.api) {
+              loadWorkflow(content.api, fileName, true);
+            }
+            showToast('Combined Workflow Loaded', `Successfully loaded combined data from ${fileName}`, 'success');
+          } else {
+            // 2. Single format - check structure
+            const keys = Object.keys(content);
+            const isApi = keys.some(k => !isNaN(parseInt(k)));
+            
+            if (isApi) {
+              // Load API format workflow
+              loadWorkflow(content, fileName, true);
+              
+              // Search for sister WebUI workflow
+              if (fileData.sister && fileData.sister.content && Array.isArray(fileData.sister.content.nodes)) {
+                applyWebUiWorkflow(fileData.sister.content, fileData.sister.fileName);
+                showToast('Auto-linked Web UI Workflow', `System automatically found and loaded the related Web UI version: ${fileData.sister.fileName}`, 'success');
+              } else {
+                // Clear old WebUI workflow
+                webUiWorkflow = null;
+                localStorage.removeItem('comfyui_webui_workflow_json');
+                localStorage.removeItem('comfyui_webui_workflow_filename');
+                const nameEl = document.getElementById('webui-workflow-filename');
+                if (nameEl) {
+                  nameEl.value = '';
+                  nameEl.classList.remove('loaded');
+                }
+              }
+            } else if (content.nodes && Array.isArray(content.nodes)) {
+              // Load WebUI format workflow
+              applyWebUiWorkflow(content, fileName);
+              
+              // Search for sister API workflow
+              if (fileData.sister && fileData.sister.content) {
+                const sisterKeys = Object.keys(fileData.sister.content);
+                const sisterIsApi = sisterKeys.some(k => !isNaN(parseInt(k)));
+                if (sisterIsApi) {
+                  loadWorkflow(fileData.sister.content, fileData.sister.fileName, true);
+                  showToast('Auto-linked API Workflow', `System automatically found and loaded the related API version: ${fileData.sister.fileName}`, 'success');
+                }
+              } else {
+                // Clear old API workflow
+                currentWorkflow = null;
+                localStorage.removeItem('comfyui_workflow_json');
+                localStorage.removeItem('comfyui_workflow_filename');
+                const filenameEl = document.getElementById('workflow-filename');
+                if (filenameEl) {
+                  filenameEl.value = '';
+                  filenameEl.classList.remove('loaded');
+                }
+              }
+            } else {
+              showToast('Invalid Workflow', 'This file does not appear to be a valid ComfyUI JSON format.', 'error');
             }
           }
         }
       } catch (err) {
-        alert(err.message);
+        showToast('Load Error', err.message, 'error');
       }
     });
   }
@@ -623,8 +697,8 @@ function saveWorkflowToLocalStorage() {
       if (!slotState.nodeId) return;
       // Persist image filename
       const hiddenInput = document.getElementById(`img-slot-${slotState.slotIndex}-hidden`);
-      if (hiddenInput && hiddenInput.value && currentWorkflow[slotState.nodeId]) {
-        currentWorkflow[slotState.nodeId].inputs.image = hiddenInput.value;
+      if (hiddenInput && currentWorkflow[slotState.nodeId]) {
+        currentWorkflow[slotState.nodeId].inputs.image = hiddenInput.value || '';
       }
       // Persist rotation value
       if (slotState.rotateNodeId && currentWorkflow[slotState.rotateNodeId]) {
@@ -636,6 +710,8 @@ function saveWorkflowToLocalStorage() {
           currentWorkflow[slotState.flipNodeId].inputs.flip_method = "y-axis: horizontally";
         } else if (slotState.flip === 'vertical') {
           currentWorkflow[slotState.flipNodeId].inputs.flip_method = "x-axis: vertically";
+        } else {
+          currentWorkflow[slotState.flipNodeId].inputs.flip_method = "none";
         }
       }
     });
@@ -903,6 +979,22 @@ function applyPreservedSettings(workflow, settings) {
 
       localStorage.setItem(`img_slot_${slotIndex}_enabled`, String(preservedSlot.enabled));
       localStorage.setItem(`img_slot_${slotIndex}_flip`, preservedSlot.flip);
+    } else {
+      // Clear this image slot and reset flip/rotation as it is not present in the imported prompt
+      workflow[loadId].inputs.image = "";
+      
+      const rotateId = rotateNodeForLoad[loadId];
+      if (rotateId) {
+        workflow[rotateId].inputs.rotation = "none";
+      }
+
+      const flipId = flipNodeForLoad[loadId];
+      if (flipId) {
+        workflow[flipId].inputs.flip_method = "none";
+      }
+
+      localStorage.setItem(`img_slot_${slotIndex}_enabled`, "false");
+      localStorage.setItem(`img_slot_${slotIndex}_flip`, "none");
     }
   });
 }
@@ -1083,11 +1175,15 @@ function generateDynamicParamsUI(workflow) {
 
   // --- Pre-scan: Find QwenCanvasPlus nodes ---
   let hasQwenCanvas = false;
+  qwenCanvasNodeId = null;
   for (const nodeId in workflow) {
     const node = workflow[nodeId];
     if (!node || !node.inputs) continue;
     if (node.class_type === 'QwenCanvasPlus') {
       hasQwenCanvas = true;
+      if (!qwenCanvasNodeId) {
+        qwenCanvasNodeId = nodeId;
+      }
 
       // We want to render its inputs: aspect_ratio, vae_encode, scaling_strategy, batch_size
       const inputsToRender = [
@@ -1128,6 +1224,70 @@ function generateDynamicParamsUI(workflow) {
 
   if (hasQwenCanvas && qwenCanvasPanel) {
     qwenCanvasPanel.classList.remove('hidden');
+  }
+
+  const sidebarQwenCard = document.getElementById('sidebar-qwen-canvas-card');
+  const sidebarQwenSelect = document.getElementById('sidebar-qwen-aspect-ratio');
+  if (sidebarQwenCard) {
+    if (hasQwenCanvas && qwenCanvasNodeId && sidebarQwenSelect) {
+      sidebarQwenCard.style.display = 'block';
+      const mainSelectId = `param-${qwenCanvasNodeId}-aspect_ratio`;
+
+      const autoCheckbox = document.getElementById('qwen-auto-aspect-ratio');
+      const isAuto = autoCheckbox ? autoCheckbox.checked : (localStorage.getItem('qwen_auto_aspect_ratio') === 'true');
+
+      const syncMainToSidebar = () => {
+        const mainSelect = document.getElementById(mainSelectId);
+        if (!mainSelect) return;
+        
+        sidebarQwenSelect.innerHTML = '';
+        Array.from(mainSelect.options).forEach(opt => {
+          const newOpt = document.createElement('option');
+          newOpt.value = opt.value;
+          newOpt.textContent = opt.textContent;
+          newOpt.selected = opt.selected;
+          sidebarQwenSelect.appendChild(newOpt);
+        });
+        sidebarQwenSelect.value = mainSelect.value;
+        
+        // Disable dropdowns if auto-detect is active
+        sidebarQwenSelect.disabled = isAuto;
+        mainSelect.disabled = isAuto;
+      };
+
+      // Initial sync (in case main is already created and populated)
+      const mainSelect = document.getElementById(mainSelectId);
+      if (mainSelect) {
+        syncMainToSidebar();
+        
+        // Listen for changes on main select (especially when populated via populateLoaderChoices)
+        mainSelect.addEventListener('change', () => {
+          if (sidebarQwenSelect.value !== mainSelect.value || sidebarQwenSelect.options.length !== mainSelect.options.length) {
+            syncMainToSidebar();
+          }
+        });
+      }
+
+      // Sync sidebar select to main select
+      sidebarQwenSelect.onchange = () => {
+        const targetMainSelect = document.getElementById(mainSelectId);
+        if (targetMainSelect && targetMainSelect.value !== sidebarQwenSelect.value) {
+          targetMainSelect.value = sidebarQwenSelect.value;
+          targetMainSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      };
+
+      if (isAuto) {
+        setTimeout(updateQwenAspectFromSlot, 100);
+      }
+    } else {
+      sidebarQwenCard.style.display = 'none';
+      if (sidebarQwenSelect) {
+        sidebarQwenSelect.innerHTML = '';
+        sidebarQwenSelect.onchange = null;
+        sidebarQwenSelect.disabled = false;
+      }
+    }
   }
 
   // --- Pre-scan: Identify positive/negative prompt nodes from sampler inputs ---
@@ -1980,6 +2140,9 @@ function createImageInputSlotElement(slotState, workflow) {
     localStorage.setItem(`img_slot_${slotState.slotIndex}_flip`, slotState.flip);
     applyRotationToPreviewImg();
     saveWorkflowToLocalStorage();
+    if (typeof updateQwenAspectFromSlot === 'function') {
+      updateQwenAspectFromSlot();
+    }
   });
 
   // --- Rotate button handler ---
@@ -1990,6 +2153,9 @@ function createImageInputSlotElement(slotState, workflow) {
     rotateBtn.textContent = `↻ ${ROTATION_LABELS[slotState.rotation]}`;
     applyRotationToPreviewImg();
     saveWorkflowToLocalStorage();
+    if (typeof updateQwenAspectFromSlot === 'function') {
+      updateQwenAspectFromSlot();
+    }
   });
 
   // --- Select image button handler ---
@@ -2029,6 +2195,16 @@ function createImageInputSlotElement(slotState, workflow) {
       preview.innerHTML = `<img src="${localUrl}" alt="Preview">`;
       applyRotationToPreviewImg();
 
+      // Trigger aspect ratio update as soon as local preview image loads
+      const localImg = preview.querySelector('img');
+      if (localImg) {
+        localImg.addEventListener('load', () => {
+          if (typeof updateQwenAspectFromSlot === 'function') {
+            updateQwenAspectFromSlot();
+          }
+        });
+      }
+
       const uploadResult = await window.api.uploadImageToComfyUI({
         filePath: fileData.filePath,
         comfyUrl: comfyuiUrl
@@ -2043,6 +2219,9 @@ function createImageInputSlotElement(slotState, workflow) {
         saveWorkflowToLocalStorage();
         if (window.updateAutosavePreview) window.updateAutosavePreview();
         updateCompareButtonState();
+        if (typeof updateQwenAspectFromSlot === 'function') {
+          updateQwenAspectFromSlot();
+        }
       } else {
         throw new Error(uploadResult.error || 'Upload failed');
       }
@@ -2063,6 +2242,14 @@ function createImageInputSlotElement(slotState, workflow) {
       if (result.ok) {
         preview.innerHTML = `<img src="${result.dataUrl}" alt="Preview">`;
         applyRotationToPreviewImg();
+        const serverImg = preview.querySelector('img');
+        if (serverImg) {
+          serverImg.addEventListener('load', () => {
+            if (typeof updateQwenAspectFromSlot === 'function') {
+              updateQwenAspectFromSlot();
+            }
+          });
+        }
       }
     }).catch(err => console.log('Failed to fetch slot image preview', err));
   }
@@ -2456,8 +2643,7 @@ function handleWebSocketMessage(data) {
   
   switch (type) {
     case 'status': {
-      const running = data.data.status.exec_info.queue_remaining;
-      document.getElementById('queue-status').textContent = `Running: ${running}`;
+      checkQueueStatus();
       break;
     }
 
@@ -2470,6 +2656,11 @@ function handleWebSocketMessage(data) {
           (activePromptId === null && pendingPromptId === true)) {
         // Bind the real prompt_id as early as possible so subsequent events match
         activePromptId = incomingId;
+        const runningJob = jobHistoryList.find(j => j.promptId === incomingId);
+        if (runningJob) {
+          runningJob.status = 'running';
+          refreshJobsListIfVisible();
+        }
         myQueuedPromptIds.delete(incomingId);
         pendingPromptId = false;
         window.api.logDebug({ message: `execution_start: bound activePromptId=${activePromptId}` });
@@ -2515,6 +2706,11 @@ function handleWebSocketMessage(data) {
         document.getElementById('display-loading').classList.add('hidden');
 
         const finishedPromptId = activePromptId;
+        const completedJob = jobHistoryList.find(j => j.promptId === finishedPromptId);
+        if (completedJob) {
+          completedJob.status = 'completed';
+          refreshJobsListIfVisible();
+        }
         activePromptId = null;
         // Do NOT reset promptSavedPath and savedForPromptId here so that the "Open in Viewer" button continues to open the saved file path of the completed run
 
@@ -2643,8 +2839,15 @@ function handleWebSocketMessage(data) {
 
       showToast('Execution Stopped', 'The image generation was stopped.', 'warning');
 
-      if (activePromptId) {
-        delete promptSamplerCountsMap[activePromptId];
+      const finishedPromptId = incomingId || activePromptId;
+      if (finishedPromptId) {
+        const interruptedJob = jobHistoryList.find(j => j.promptId === finishedPromptId);
+        if (interruptedJob) {
+          interruptedJob.status = 'interrupted';
+          refreshJobsListIfVisible();
+        }
+        delete promptSamplerCountsMap[finishedPromptId];
+        promptJobStates.delete(finishedPromptId);
       }
       activePromptId = null;
       pendingPromptId = false;
@@ -2672,7 +2875,13 @@ function handleWebSocketMessage(data) {
       showToast('Execution Error', data.data.exception_message || 'An error occurred during ComfyUI execution', 'error');
 
       if (activePromptId) {
+        const errorJob = jobHistoryList.find(j => j.promptId === activePromptId);
+        if (errorJob) {
+          errorJob.status = 'failed';
+          refreshJobsListIfVisible();
+        }
         delete promptSamplerCountsMap[activePromptId];
+        promptJobStates.delete(activePromptId);
       }
       activePromptId = null;
       pendingPromptId = false;
@@ -2807,6 +3016,10 @@ function updateProgress(val, max, labelText) {
   } else {
     fill.style.width = '0%';
   }
+  
+  if (typeof updateComfyWorkingStatus === 'function') {
+    updateComfyWorkingStatus(activePromptId !== null);
+  }
 }
 
 // ─── Web-UI Workflow Loader (optional, for correct PNG metadata) ──────────────────
@@ -2828,22 +3041,32 @@ const WEB_UI_WIDGET_SCHEMA = {
 };
 
 // Clone the web-UI format workflow and update widget_values from current UI / lastSubmittedWorkflow
-function injectParamsIntoWebUiWorkflow(wuJson) {
+function injectParamsIntoWebUiWorkflow(wuJson, promptId) {
   const clone = JSON.parse(JSON.stringify(wuJson));
-  const wf = lastSubmittedWorkflow || currentWorkflow;
+  const state = promptId ? promptJobStates.get(promptId) : null;
+  const wf = state ? state.workflow : (lastSubmittedWorkflow || currentWorkflow);
   if (!Array.isArray(clone.nodes)) return clone;
 
   // Build nodeId → current param values from UI (highest priority) and API workflow
   const uiValues = {}; // { nodeId: { key: value } }
   paramMappings.forEach(mapping => {
-    const el = document.getElementById(mapping.elementId);
-    if (!el) return;
-    const val = mapping.type === 'number' ? Number(el.value) : el.value;
+    let val;
+    if (state && state.paramValues && state.paramValues[mapping.elementId] !== undefined) {
+      val = state.paramValues[mapping.elementId];
+      if (mapping.type === 'number') {
+        val = Number(val);
+      }
+    } else {
+      const el = document.getElementById(mapping.elementId);
+      if (!el) return;
+      val = mapping.type === 'number' ? Number(el.value) : el.value;
+    }
     if (!uiValues[mapping.nodeId]) uiValues[mapping.nodeId] = {};
     uiValues[mapping.nodeId][mapping.key] = val;
   });
   // Use imageSlots state directly (more reliable than DOM hidden inputs)
-  imageSlots.forEach(slot => {
+  const slotsToUse = state && state.imageSlots ? state.imageSlots : imageSlots;
+  slotsToUse.forEach(slot => {
     if (slot.nodeId && slot.imageFilename) {
       if (!uiValues[slot.nodeId]) uiValues[slot.nodeId] = {};
       uiValues[slot.nodeId]['image'] = slot.imageFilename;
@@ -2960,24 +3183,196 @@ function initWebUiWorkflowLoader() {
   }
 }
 
+// ─── Workflow Combiner Dialog ────────────────────────────────────────────────
+function initCombineWorkflowsDialog() {
+  const btnDialog = document.getElementById('btn-combine-dialog');
+  const modal = document.getElementById('combine-modal');
+  const btnCancel = document.getElementById('btn-combine-cancel');
+  const btnOk = document.getElementById('btn-combine-ok');
+  
+  const inputWebui = document.getElementById('combine-webui-path');
+  const btnWebui = document.getElementById('btn-browse-combine-webui');
+  
+  const inputApi = document.getElementById('combine-api-path');
+  const btnApi = document.getElementById('btn-browse-combine-api');
+  
+  const inputOutput = document.getElementById('combine-output-path');
+  const btnOutput = document.getElementById('btn-browse-combine-output');
+
+  if (!btnDialog || !modal) return;
+
+  // Open Combine dialog modal
+  btnDialog.addEventListener('click', () => {
+    inputWebui.value = '';
+    inputWebui.classList.remove('loaded');
+    inputApi.value = '';
+    inputApi.classList.remove('loaded');
+    inputOutput.value = '';
+    inputOutput.classList.remove('loaded');
+    modal.classList.remove('hidden');
+  });
+
+  // Close modal on Cancel
+  btnCancel.addEventListener('click', () => {
+    modal.classList.add('hidden');
+  });
+
+  // Select WebUI file
+  btnWebui.addEventListener('click', async () => {
+    try {
+      const fileData = await window.api.selectWorkflowFile();
+      if (fileData) {
+        inputWebui.value = fileData.filePath;
+        inputWebui.classList.add('loaded');
+        
+        // Auto-suggest sister API file if available
+        if (fileData.sister && !inputApi.value) {
+          inputApi.value = fileData.sister.filePath;
+          inputApi.classList.add('loaded');
+        }
+        
+        // Auto-suggest output path
+        updateDefaultOutputPath();
+      }
+    } catch (err) {
+      showToast('Error', err.message, 'error');
+    }
+  });
+
+  // Select API file
+  btnApi.addEventListener('click', async () => {
+    try {
+      const fileData = await window.api.selectWorkflowFile();
+      if (fileData) {
+        inputApi.value = fileData.filePath;
+        inputApi.classList.add('loaded');
+        
+        // Auto-suggest sister WebUI file if available
+        if (fileData.sister && !inputWebui.value) {
+          inputWebui.value = fileData.sister.filePath;
+          inputWebui.classList.add('loaded');
+        }
+        
+        // Auto-suggest output path
+        updateDefaultOutputPath();
+      }
+    } catch (err) {
+      showToast('Error', err.message, 'error');
+    }
+  });
+
+  // Helper to suggest an output path in the same directory as selected inputs
+  function updateDefaultOutputPath() {
+    if (inputOutput.value) return; // User already chose one
+    
+    const sourcePath = inputWebui.value || inputApi.value;
+    if (!sourcePath) return;
+
+    // Use source directory and replace suffixes (like _webui or _api) with _combined
+    const ext = sourcePath.substring(sourcePath.lastIndexOf('.'));
+    const base = sourcePath.substring(0, sourcePath.lastIndexOf('.'));
+    
+    let suggestedBase = base;
+    if (suggestedBase.toLowerCase().endsWith('_webui') || suggestedBase.toLowerCase().endsWith('-webui')) {
+      suggestedBase = suggestedBase.substring(0, suggestedBase.length - 6);
+    } else if (suggestedBase.toLowerCase().endsWith('_api') || suggestedBase.toLowerCase().endsWith('-api')) {
+      suggestedBase = suggestedBase.substring(0, suggestedBase.length - 4);
+    }
+    
+    inputOutput.value = suggestedBase + '_combined' + ext;
+    inputOutput.classList.add('loaded');
+  }
+
+  // Select Output destination path
+  btnOutput.addEventListener('click', async () => {
+    try {
+      const defaultPath = inputOutput.value || '';
+      const destPath = await window.api.selectSaveWorkflowFile(defaultPath);
+      if (destPath) {
+        inputOutput.value = destPath;
+        inputOutput.classList.add('loaded');
+      }
+    } catch (err) {
+      showToast('Error', err.message, 'error');
+    }
+  });
+
+  // Combine operation
+  btnOk.addEventListener('click', async () => {
+    const webuiPath = inputWebui.value.trim();
+    const apiPath = inputApi.value.trim();
+    const outputPath = inputOutput.value.trim();
+
+    if (!webuiPath) {
+      showToast('Missing WebUI file', 'Please select a WebUI format workflow JSON file.', 'error');
+      return;
+    }
+    if (!apiPath) {
+      showToast('Missing API file', 'Please select an API format workflow JSON file.', 'error');
+      return;
+    }
+    if (!outputPath) {
+      showToast('Missing output file', 'Please select a destination to save the combined file.', 'error');
+      return;
+    }
+
+    btnOk.disabled = true;
+    try {
+      const result = await window.api.combineWorkflows({ webuiPath, apiPath, outputPath });
+      if (result.ok) {
+        modal.classList.add('hidden');
+        showToast('Success', `Combined workflow saved to: ${result.fileName}`, 'success');
+        
+        // Auto-load the newly combined file into the application
+        if (result.content) {
+          const content = result.content;
+          const fileName = result.fileName;
+          if (content.webui) {
+            applyWebUiWorkflow(content.webui, fileName + ' (Web UI)');
+          }
+          if (content.api) {
+            loadWorkflow(content.api, fileName, true);
+          }
+        }
+      } else {
+        showToast('Combine Error', result.error, 'error');
+      }
+    } catch (err) {
+      showToast('Exception', err.message, 'error');
+    } finally {
+      btnOk.disabled = false;
+    }
+  });
+}
+
+
 // ─── Metadata Collection Helper ────────────────────────────────────────────────────
 // Collects current workflow parameter values and formats them for PNG metadata embedding.
 // Returns { parameters: string, workflow: string }
-function collectImageMetadata() {
-  const wf = lastSubmittedWorkflow || currentWorkflow;
+function collectImageMetadata(promptId) {
+  const state = promptId ? promptJobStates.get(promptId) : null;
+  const wf = state ? state.workflow : (lastSubmittedWorkflow || currentWorkflow);
   const positivePrompts = [];
   const negativePrompts = [];
   const otherLines = [];
 
   paramMappings.forEach(mapping => {
-    const el = document.getElementById(mapping.elementId);
-    if (!el || mapping.isImageSlot) return;
+    let rawVal = '';
+    if (state && state.paramValues && state.paramValues[mapping.elementId] !== undefined) {
+      rawVal = state.paramValues[mapping.elementId];
+    } else {
+      const el = document.getElementById(mapping.elementId);
+      if (el) {
+        rawVal = el.value ? el.value.trim() : '';
+      }
+    }
 
-    const rawVal = el.value ? el.value.trim() : '';
+    if (mapping.isImageSlot) return;
     if (!rawVal) return;
 
     // Determine field role from label text
-    const labelEl = el.closest('.param-item')?.querySelector('.param-name');
+    const el = document.getElementById(mapping.elementId);
+    const labelEl = el?.closest('.param-item')?.querySelector('.param-name');
     const label   = labelEl ? labelEl.textContent : '';
     const isNeg   = label.toLowerCase().includes('negative') || label.includes('\uD83D\uDEAB');
 
@@ -3011,7 +3406,7 @@ function collectImageMetadata() {
     prompt: wf ? JSON.stringify(wf) : '',
     // If user provided a web-UI workflow, inject current params and embed as 'workflow'
     ...(webUiWorkflow
-      ? { workflow: JSON.stringify(injectParamsIntoWebUiWorkflow(webUiWorkflow)) }
+      ? { workflow: JSON.stringify(injectParamsIntoWebUiWorkflow(webUiWorkflow, promptId)) }
       : {})
   };
 }
@@ -3020,6 +3415,13 @@ function collectImageMetadata() {
 // promptId is passed so we can guard against saving the same prompt's image twice
 // (multiple SaveImage nodes in one workflow each fire 'executed' independently).
 async function displayGeneratedImage(filename, subfolder, type, promptId) {
+  if (promptId) {
+    const job = jobHistoryList.find(j => j.promptId === promptId);
+    if (job) {
+      job.filename = filename;
+      refreshJobsListIfVisible();
+    }
+  }
   // Determine synchronously if we should auto-save for this prompt to prevent race conditions
   let shouldAutoSave = false;
   if (outputFolderPath && promptId && savedForPromptId !== promptId) {
@@ -3092,6 +3494,9 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
   if (shouldAutoSave) {
     const downloadUrl = `${comfyuiUrl}/view?filename=${encodeURIComponent(filename)}&type=${type}&subfolder=${encodeURIComponent(subfolder)}`;
 
+    const state = promptId ? promptJobStates.get(promptId) : null;
+    const autosaveSnap = state ? state.autosaveSettings : null;
+
     const prefixInput = document.getElementById('autosave-prefix');
     const insertOriginalCheckbox = document.getElementById('autosave-insert-original');
     const paddingInput = document.getElementById('autosave-padding');
@@ -3099,23 +3504,25 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
     const sourceSelect = document.getElementById('autosave-original-source');
     const delimInput = document.getElementById('autosave-delimiter');
 
-    const prefix = prefixInput ? prefixInput.value.trim() : 'autosave';
-    const insertOriginal = insertOriginalCheckbox ? insertOriginalCheckbox.checked : true;
-    const padding = paddingInput ? parseInt(paddingInput.value, 10) : 4;
-    let startingNo = startingNoInput ? parseInt(startingNoInput.value, 10) : 1;
+    const prefix = autosaveSnap ? autosaveSnap.prefix : (prefixInput ? prefixInput.value.trim() : 'autosave');
+    const insertOriginal = autosaveSnap ? autosaveSnap.insertOriginal : (insertOriginalCheckbox ? insertOriginalCheckbox.checked : true);
+    const padding = autosaveSnap ? autosaveSnap.padding : (paddingInput ? parseInt(paddingInput.value, 10) : 4);
+    let startingNo = autosaveSnap ? autosaveSnap.startingNo : (startingNoInput ? parseInt(startingNoInput.value, 10) : 1);
     if (isNaN(startingNo) || startingNo < 0) startingNo = 1;
-    let source = sourceSelect ? sourceSelect.value : 'slot1';
+    let source = autosaveSnap ? autosaveSnap.source : (sourceSelect ? sourceSelect.value : 'slot1');
     if (source === 'default') source = 'slot1';
-    const delimiter = delimInput ? delimInput.value : '_';
+    const delimiter = autosaveSnap ? autosaveSnap.delimiter : (delimInput ? delimInput.value : '_');
 
     // Collect metadata to embed into the saved PNG
-    const pngMetadata = collectImageMetadata();
+    const pngMetadata = collectImageMetadata(promptId);
+
+    const slotsToUse = state && state.imageSlots ? state.imageSlots : imageSlots;
 
     // Resolve source image URL for metadata extraction (slot reference image)
     let sourceImageUrl = null;
     if (insertOriginal) {
       const slotIdx = parseInt(source.replace('slot', ''), 10) - 1;
-      const slot = imageSlots.find(s => s.slotIndex === slotIdx);
+      const slot = slotsToUse.find(s => s.slotIndex === slotIdx);
       if (slot && slot.imageFilename) {
         sourceImageUrl = `${comfyuiUrl}/view?filename=${encodeURIComponent(slot.imageFilename)}&type=input`;
       }
@@ -3128,7 +3535,7 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
     let originalBasename = '';
     if (insertOriginal) {
       const slotIdx = parseInt(source.replace('slot', ''), 10) - 1;
-      const slot = imageSlots.find(s => s.slotIndex === slotIdx);
+      const slot = slotsToUse.find(s => s.slotIndex === slotIdx);
       if (slot && slot.imageFilename) {
         const fn = slot.imageFilename;
         originalBasename = fn.substring(0, fn.lastIndexOf('.')) || fn;
@@ -3186,6 +3593,13 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
       if (result.ok) {
         // Save complete — record path and update the Open button for ALL subsequent output nodes
         promptSavedPath = result.savedPath;
+        if (promptId) {
+          const job = jobHistoryList.find(j => j.promptId === promptId);
+          if (job) {
+            job.filename = result.savedPath.split(/[\\/]/).pop();
+            refreshJobsListIfVisible();
+          }
+        }
         openBtn.onclick = () => window.api.openPath({ path: result.savedPath });
         console.log(`[AutoSave] Saved: ${result.savedPath}`);
 
@@ -3207,7 +3621,7 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
         // Auto-run Face Fusion if checked
         const autoSendFf = document.getElementById('auto-send-ff');
         if (autoSendFf && autoSendFf.checked) {
-          triggerAutoFaceFusion(result.savedPath);
+          triggerAutoFaceFusion(result.savedPath, promptId);
         }
       } else {
         console.error(`[AutoSave Failed] ${result.error}`);
@@ -3261,6 +3675,11 @@ async function interruptActiveGeneration() {
     
     // 2. Also try to delete it from the queue if it was pending
     if (activePromptId) {
+      const interruptedJob = jobHistoryList.find(j => j.promptId === activePromptId);
+      if (interruptedJob) {
+        interruptedJob.status = 'interrupted';
+        refreshJobsListIfVisible();
+      }
       await comfyFetch(`/queue`, {
         method: 'POST',
         headers: {
@@ -3322,6 +3741,22 @@ function initGeneration() {
           if (window.api && typeof window.api.logDebug === 'function') {
             window.api.logDebug({ message: warningMsg });
           }
+          return;
+        }
+
+        // Validate that all enabled active image slots have an image filename selected
+        let validationFailed = false;
+        imageSlots.forEach(slotState => {
+          if (slotState.nodeId && slotState.enabled) {
+            const hiddenInput = document.getElementById(`img-slot-${slotState.slotIndex}-hidden`);
+            const imageVal = hiddenInput ? hiddenInput.value : slotState.imageFilename;
+            if (!imageVal || imageVal.trim() === '') {
+              showToast('Missing Image', `Please select an image for Slot ${slotState.slotIndex + 1} or disable it.`, 'warning');
+              validationFailed = true;
+            }
+          }
+        });
+        if (validationFailed) {
           return;
         }
 
@@ -3506,6 +3941,16 @@ function initGeneration() {
         // Snapshot the fully-resolved workflow (with randomised seeds) for metadata embedding later
         lastSubmittedWorkflow = workflowCopy;
 
+        // Snapshot parameter and image slots state for this run
+        const capturedParamValues = {};
+        paramMappings.forEach(mapping => {
+          const el = document.getElementById(mapping.elementId);
+          if (el) {
+            capturedParamValues[mapping.elementId] = el.value;
+          }
+        });
+        const capturedImageSlots = JSON.parse(JSON.stringify(imageSlots));
+
         // 2. Submit prompt JSON to ComfyUI
         //    Read the selected preview method from the UI dropdown (defaults to 'auto').
         const previewSelect = document.getElementById('preview-method-select');
@@ -3533,6 +3978,66 @@ function initGeneration() {
         if (result && result.prompt_id) {
           myQueuedPromptIds.add(result.prompt_id);
           promptSamplerCountsMap[result.prompt_id] = newSamplerCount;
+          const ffSettings = captureFacefusionSettings();
+          const autosaveSettings = {
+            prefix: document.getElementById('autosave-prefix')?.value.trim() || 'autosave',
+            insertOriginal: document.getElementById('autosave-insert-original')?.checked ?? true,
+            padding: parseInt(document.getElementById('autosave-padding')?.value, 10) || 4,
+            startingNo: parseInt(document.getElementById('autosave-starting-no')?.value, 10) || 1,
+            source: document.getElementById('autosave-original-source')?.value || 'slot1',
+            delimiter: document.getElementById('autosave-delimiter')?.value || '_'
+          };
+          
+          promptJobStates.set(result.prompt_id, {
+            paramValues: capturedParamValues,
+            imageSlots: capturedImageSlots,
+            workflow: workflowCopy,
+            facefusionSettings: ffSettings,
+            autosaveSettings: autosaveSettings
+          });
+
+          const autoSendFf = document.getElementById('auto-send-ff');
+          const isLinked = autoSendFf ? autoSendFf.checked : false;
+
+          let initialFilename = 'Pending...';
+          if (outputFolderPath) {
+            const prefix = autosaveSettings.prefix;
+            const insertOriginal = autosaveSettings.insertOriginal;
+            const padding = autosaveSettings.padding;
+            const startingNo = autosaveSettings.startingNo;
+            const delimiter = autosaveSettings.delimiter;
+            const source = autosaveSettings.source;
+
+            let originalBasename = '';
+            if (insertOriginal) {
+              const slotIdx = parseInt(source.replace('slot', ''), 10) - 1;
+              const slot = capturedImageSlots.find(s => s.slotIndex === slotIdx);
+              if (slot && slot.imageFilename) {
+                const fn = slot.imageFilename;
+                originalBasename = fn.substring(0, fn.lastIndexOf('.')) || fn;
+              }
+            }
+
+            const formattedNo = padding > 0 ? String(startingNo).padStart(padding, '0') : String(startingNo);
+            const parts = [];
+            if (prefix) parts.push(prefix);
+            if (insertOriginal && originalBasename) parts.push(originalBasename);
+            parts.push(formattedNo);
+
+            initialFilename = parts.filter(Boolean).join(delimiter) + '.png';
+          }
+
+          jobHistoryList.push({
+            promptId: result.prompt_id,
+            timestamp: new Date(),
+            status: 'pending',
+            filename: initialFilename,
+            aspectRatio: getAspectRatioForPrompt(capturedParamValues),
+            linkedToFF: isLinked,
+            faceSelectorOrder: isLinked && ffSettings ? ffSettings.faceSelectorOrder : '-'
+          });
+          refreshJobsListIfVisible();
+
           window.api.logDebug({ message: `Prompt added to myQueuedPromptIds: ${result.prompt_id}, samplerCount: ${newSamplerCount}` });
           console.log(`Prompt queued successfully! Prompt ID: ${result.prompt_id}`);
         }
@@ -3871,7 +4376,7 @@ function checkAndProcessFacefusionQueue() {
   if (!btnRunFf) return;
 
   // If already running or busy, wait in queue
-  if (btnRunFf.disabled) {
+  if (isFacefusionRunning) {
     console.log('[FaceFusion Queue] Process is currently busy. Waiting in queue. Remaining items:', facefusionQueue.length);
     return;
   }
@@ -3880,7 +4385,18 @@ function checkAndProcessFacefusionQueue() {
     return;
   }
 
-  const nextPath = facefusionQueue.shift();
+  const nextItem = facefusionQueue.shift();
+  let nextPath = '';
+  if (nextItem && typeof nextItem === 'object') {
+    nextPath = nextItem.savedPath;
+    currentFFSnapshot = nextItem.ffSettings;
+    currentFFJobId = nextItem.jobId || null;
+  } else {
+    nextPath = nextItem;
+    currentFFSnapshot = null;
+    currentFFJobId = null;
+  }
+
   console.log('[FaceFusion Queue] Processing next queued image:', nextPath);
   showToast('Queue Processing', `Processing next image in Face Fusion queue. Remaining: ${facefusionQueue.length}`, 'success');
 
@@ -3912,10 +4428,32 @@ function checkAndProcessFacefusionQueue() {
   btnRunFf.click();
 }
 
-function triggerAutoFaceFusion(savedPath) {
-  facefusionQueue.push(savedPath);
+function triggerAutoFaceFusion(savedPath, promptId) {
+  const state = promptId ? promptJobStates.get(promptId) : null;
+  const ffSettings = state ? state.facefusionSettings : null;
+
+  const targetFilename = savedPath.split(/[\\/]/).pop();
+  const sourceFilename = ffSettings ? (ffSettings.sourcePath ? ffSettings.sourcePath.split(/[\\/]/).pop() : 'N/A') : (ffSourcePath ? ffSourcePath.split(/[\\/]/).pop() : 'N/A');
+  const selectorOrder = ffSettings ? ffSettings.faceSelectorOrder : (document.getElementById('ff-selector-order')?.value || '-');
+  
+  const jobId = 'ff_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+  
+  ffJobHistoryList.push({
+    id: jobId,
+    promptId: promptId,
+    timestamp: new Date(),
+    status: 'pending',
+    targetFilename: targetFilename,
+    outputFilename: 'Pending...',
+    sourceFilename: sourceFilename,
+    selectorOrder: selectorOrder
+  });
+
+  facefusionQueue.push({ savedPath, ffSettings, jobId });
   console.log(`[FaceFusion Queue] Added image path to queue: ${savedPath}. Total items: ${facefusionQueue.length}`);
   showToast('Added to Queue', `Image added to Face Fusion queue (${facefusionQueue.length} pending)`, 'info');
+  
+  refreshJobsListIfVisible();
   checkAndProcessFacefusionQueue();
 }
 
@@ -4005,6 +4543,9 @@ async function setSlotImage(slotIndex, filePath, fileName) {
 
 function initAutomationSettings() {
   const autoSendFf = document.getElementById('auto-send-ff');
+  const autoSendFfGroup = document.getElementById('auto-send-ff-settings-group');
+  const autoSendFfSelectorOrder = document.getElementById('auto-send-ff-selector-order');
+
   const autoWatchFolder = document.getElementById('auto-watch-folder');
   const watchGroup = document.getElementById('watch-folder-settings-group');
   const watchPathDisplay = document.getElementById('watch-path-display');
@@ -4015,6 +4556,7 @@ function initAutomationSettings() {
   const savedSendFf = localStorage.getItem('auto_send_ff') === 'true';
   const savedWatchFolder = localStorage.getItem('auto_watch_folder') === 'true';
   const savedWatchPath = localStorage.getItem('watch_folder_path') || '';
+  const savedSelectorOrder = localStorage.getItem('ff_selector_order') || 'large-small';
 
   if (autoSendFf) autoSendFf.checked = savedSendFf;
   if (autoWatchFolder) autoWatchFolder.checked = savedWatchFolder;
@@ -4028,10 +4570,36 @@ function initAutomationSettings() {
     watchGroup.style.display = savedWatchFolder ? 'block' : 'none';
   }
 
+  // Toggle auto face fusion settings visibility initially
+  if (autoSendFfGroup) {
+    autoSendFfGroup.style.display = savedSendFf ? 'block' : 'none';
+  }
+
+  // Initialize selector order value
+  if (autoSendFfSelectorOrder) {
+    autoSendFfSelectorOrder.value = savedSelectorOrder;
+  }
+
   // 2. Setup event listeners
   if (autoSendFf) {
     autoSendFf.addEventListener('change', () => {
       localStorage.setItem('auto_send_ff', autoSendFf.checked);
+      if (autoSendFfGroup) {
+        autoSendFfGroup.style.display = autoSendFf.checked ? 'block' : 'none';
+      }
+    });
+  }
+
+  if (autoSendFfSelectorOrder) {
+    autoSendFfSelectorOrder.addEventListener('change', () => {
+      const val = autoSendFfSelectorOrder.value;
+      localStorage.setItem('ff_selector_order', val);
+      
+      // Sync to the Face Fusion panel select element
+      const ffSelectorOrder = document.getElementById('ff-selector-order');
+      if (ffSelectorOrder) {
+        ffSelectorOrder.value = val;
+      }
     });
   }
 
@@ -4185,6 +4753,27 @@ function initAutomationSettings() {
         }
       });
     }, 1000);
+  }
+}
+
+function initGeneralSettings() {
+  const minimizeToTrayCheckbox = document.getElementById('minimize-to-tray');
+  if (minimizeToTrayCheckbox) {
+    const savedMinimizeToTray = localStorage.getItem('minimize_to_tray') === 'true';
+    minimizeToTrayCheckbox.checked = savedMinimizeToTray;
+    
+    // Notify the main process about the initial setting value
+    if (window.api && typeof window.api.updateMinimizeToTray === 'function') {
+      window.api.updateMinimizeToTray(savedMinimizeToTray);
+    }
+    
+    minimizeToTrayCheckbox.addEventListener('change', () => {
+      const enabled = minimizeToTrayCheckbox.checked;
+      localStorage.setItem('minimize_to_tray', enabled);
+      if (window.api && typeof window.api.updateMinimizeToTray === 'function') {
+        window.api.updateMinimizeToTray(enabled);
+      }
+    });
   }
 }
 
@@ -4427,6 +5016,228 @@ async function toggleCompareMode(forceState = null) {
 let ffSourcePath = '';
 let ffTargetPath = '';
 let ffLastOutputPath = '';
+let currentFFSnapshot = null;
+let isFacefusionRunning = false;
+
+function updateComfyWorkingStatus(isWorking) {
+  const el = document.getElementById('indicator-comfy');
+  if (el) {
+    if (isWorking) {
+      el.className = 'job-status-badge job-status-running';
+      el.textContent = 'ComfyUI: Running';
+      el.title = 'ComfyUI Status: Working';
+    } else {
+      el.className = 'job-status-badge job-status-pending';
+      el.textContent = 'ComfyUI: Idle';
+      el.title = 'ComfyUI Status: Waiting';
+    }
+  }
+}
+
+function updateFFWorkingStatus(isWorking) {
+  const el = document.getElementById('indicator-ff');
+  if (el) {
+    if (isWorking) {
+      el.className = 'job-status-badge job-status-running';
+      el.textContent = 'Face Fusion: Running';
+      el.title = 'Face Fusion Status: Working';
+    } else {
+      el.className = 'job-status-badge job-status-pending';
+      el.textContent = 'Face Fusion: Idle';
+      el.title = 'Face Fusion Status: Waiting';
+    }
+  }
+}
+
+let jobHistoryList = [];
+let ffJobHistoryList = [];
+let currentFFJobId = null;
+let qwenCanvasNodeId = null;
+
+function getAspectRatioForPrompt(capturedParamValues) {
+  const mapping = paramMappings.find(m => m.key === 'aspect_ratio');
+  if (!mapping) return 'N/A';
+  if (capturedParamValues && capturedParamValues[mapping.elementId] !== undefined) {
+    return capturedParamValues[mapping.elementId];
+  }
+  const el = document.getElementById(mapping.elementId);
+  return el ? el.value : 'N/A';
+}
+
+function renderJobsList() {
+  // 1. Render ComfyUI Jobs
+  const tbody = document.getElementById('jobs-table-body');
+  if (tbody) {
+    tbody.innerHTML = '';
+    if (jobHistoryList.length === 0) {
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="5" style="text-align: center; color: var(--text-muted); padding: 20px;">No jobs recorded in this session.</td>
+        </tr>
+      `;
+    } else {
+      const sortedJobs = [...jobHistoryList].sort((a, b) => b.timestamp - a.timestamp);
+      sortedJobs.forEach(job => {
+        const tr = document.createElement('tr');
+        let statusClass = 'job-status-pending';
+        let statusLabel = 'Waiting';
+        if (job.status === 'running') {
+          statusClass = 'job-status-running';
+          statusLabel = 'Running';
+        } else if (job.status === 'completed') {
+          statusClass = 'job-status-completed';
+          statusLabel = 'Completed';
+        } else if (job.status === 'failed') {
+          statusClass = 'job-status-failed';
+          statusLabel = 'Failed';
+        } else if (job.status === 'interrupted') {
+          statusClass = 'job-status-interrupted';
+          statusLabel = 'Stopped';
+        }
+        
+        tr.innerHTML = `
+          <td class="job-filename-cell" title="${job.filename}">${job.filename}</td>
+          <td>${job.aspectRatio}</td>
+          <td>${job.linkedToFF ? 'Yes' : 'No'}</td>
+          <td>${job.faceSelectorOrder}</td>
+          <td><span class="job-status-badge ${statusClass}">${statusLabel}</span></td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+  }
+
+  // 2. Render Face Fusion Jobs
+  const ffTbody = document.getElementById('ff-jobs-table-body');
+  if (ffTbody) {
+    ffTbody.innerHTML = '';
+    if (ffJobHistoryList.length === 0) {
+      ffTbody.innerHTML = `
+        <tr>
+          <td colspan="4" style="text-align: center; color: var(--text-muted); padding: 20px;">No jobs recorded in this session.</td>
+        </tr>
+      `;
+    } else {
+      const sortedFFJobs = [...ffJobHistoryList].sort((a, b) => b.timestamp - a.timestamp);
+      sortedFFJobs.forEach(job => {
+        const tr = document.createElement('tr');
+        let statusClass = 'job-status-pending';
+        let statusLabel = 'Waiting';
+        if (job.status === 'running') {
+          statusClass = 'job-status-running';
+          statusLabel = 'Running';
+        } else if (job.status === 'completed') {
+          statusClass = 'job-status-completed';
+          statusLabel = 'Completed';
+        } else if (job.status === 'failed') {
+          statusClass = 'job-status-failed';
+          statusLabel = 'Failed';
+        } else if (job.status === 'interrupted') {
+          statusClass = 'job-status-interrupted';
+          statusLabel = 'Stopped';
+        }
+
+        tr.innerHTML = `
+          <td class="job-filename-cell" title="${job.outputFilename}">${job.outputFilename}</td>
+          <td class="job-filename-cell" title="${job.sourceFilename}">${job.sourceFilename}</td>
+          <td>${job.selectorOrder}</td>
+          <td><span class="job-status-badge ${statusClass}">${statusLabel}</span></td>
+        `;
+        ffTbody.appendChild(tr);
+      });
+    }
+  }
+}
+
+function refreshJobsListIfVisible() {
+  const modal = document.getElementById('jobs-modal');
+  if (modal && !modal.classList.contains('hidden')) {
+    renderJobsList();
+  }
+}
+
+function initJobsModal() {
+  const btnViewJobs = document.getElementById('btn-view-jobs');
+  const btnCloseJobs = document.getElementById('btn-close-jobs-modal');
+  const btnClearJobs = document.getElementById('btn-clear-jobs-modal');
+  const jobsModal = document.getElementById('jobs-modal');
+  
+  if (btnViewJobs && jobsModal) {
+    btnViewJobs.addEventListener('click', () => {
+      renderJobsList();
+      jobsModal.classList.remove('hidden');
+    });
+  }
+  
+  if (btnCloseJobs && jobsModal) {
+    btnCloseJobs.addEventListener('click', () => {
+      jobsModal.classList.add('hidden');
+    });
+  }
+
+  if (btnClearJobs) {
+    btnClearJobs.addEventListener('click', () => {
+      // Retain only running and pending jobs
+      jobHistoryList = jobHistoryList.filter(job => job.status === 'running' || job.status === 'pending');
+      ffJobHistoryList = ffJobHistoryList.filter(job => job.status === 'running' || job.status === 'pending');
+      
+      // Re-render lists
+      renderJobsList();
+      
+      // Notify the user
+      showToast('History Cleared', 'Completed and stopped/failed jobs have been cleared.', 'info');
+    });
+  }
+  
+  // Close on modal overlay click
+  if (jobsModal) {
+    jobsModal.addEventListener('click', (e) => {
+      if (e.target === jobsModal) {
+        jobsModal.classList.add('hidden');
+      }
+    });
+  }
+}
+
+function captureFacefusionSettings() {
+  const envTypeSelect = document.getElementById('ff-env-type');
+  const condaEnvInput = document.getElementById('ff-conda-env');
+  const condaPathInput = document.getElementById('ff-conda-path');
+  const folderInput = document.getElementById('ff-folder-path');
+  const pythonInput = document.getElementById('ff-python-path');
+  
+  const cbSwapper = document.getElementById('ff-proc-swapper');
+  const cbEnhancer = document.getElementById('ff-proc-enhancer');
+  const cbLipSyncer = document.getElementById('ff-proc-lip-syncer');
+  const selectProvider = document.getElementById('ff-execution-provider');
+  
+  const swapperModelSelect = document.getElementById('ff-swapper-model');
+  const swapperPixelBoostSelect = document.getElementById('ff-swapper-pixel-boost');
+  const swapperWeightNumber = document.getElementById('ff-swapper-weight-number');
+  const selectorModeSelect = document.getElementById('ff-selector-mode');
+  const selectorOrderSelect = document.getElementById('ff-selector-order');
+
+  const processors = [];
+  if (cbSwapper && cbSwapper.checked) processors.push('face_swapper');
+  if (cbEnhancer && cbEnhancer.checked) processors.push('face_enhancer');
+  if (cbLipSyncer && cbLipSyncer.checked) processors.push('lip_syncer');
+
+  return {
+    envType: envTypeSelect ? envTypeSelect.value : 'conda',
+    condaEnvName: condaEnvInput ? condaEnvInput.value.trim() : 'facefusion',
+    condaPath: condaPathInput ? condaPathInput.value.trim() : '',
+    folderPath: folderInput ? folderInput.value.trim() : '',
+    pythonPath: pythonInput ? pythonInput.value.trim() : '',
+    processors: processors,
+    executionProvider: selectProvider ? selectProvider.value : 'cuda',
+    faceSwapperModel: swapperModelSelect ? swapperModelSelect.value : 'inswapper_128',
+    faceSwapperPixelBoost: swapperPixelBoostSelect ? swapperPixelBoostSelect.value : '',
+    faceSwapperWeight: swapperWeightNumber ? parseFloat(swapperWeightNumber.value) : 1.0,
+    faceSelectorMode: selectorModeSelect ? selectorModeSelect.value : 'reference',
+    faceSelectorOrder: selectorOrderSelect ? selectorOrderSelect.value : 'large-small',
+    sourcePath: ffSourcePath
+  };
+}
 
 function initFacefusionTab() {
   const ffFolderInput = document.getElementById('ff-folder-path');
@@ -4605,7 +5416,13 @@ function initFacefusionTab() {
   }
   if (selectorOrderSelect) {
     selectorOrderSelect.addEventListener('change', () => {
-      localStorage.setItem('ff_selector_order', selectorOrderSelect.value);
+      const val = selectorOrderSelect.value;
+      localStorage.setItem('ff_selector_order', val);
+      
+      const autoSendFfSelectorOrder = document.getElementById('auto-send-ff-selector-order');
+      if (autoSendFfSelectorOrder) {
+        autoSendFfSelectorOrder.value = val;
+      }
     });
   }
 
@@ -4791,14 +5608,92 @@ function initFacefusionTab() {
   // 5. Run Facefusion Task
   if (btnRun) {
     btnRun.addEventListener('click', async () => {
-      const envType = ffEnvTypeSelect ? ffEnvTypeSelect.value : 'conda';
-      const condaEnvName = condaEnvInput ? condaEnvInput.value.trim() : 'facefusion';
-      const condaPath = ffCondaPathInput ? ffCondaPathInput.value.trim() : '';
-      const folderPath = ffFolderInput.value.trim();
-      const pythonPath = ffPythonInput.value.trim();
+      // If already running, queue this run!
+      if (isFacefusionRunning) {
+        const sourcePathVal = ffSourcePath;
+        const targetPathVal = ffTargetPath;
+
+        if (!sourcePathVal) {
+          showWarning('Source Missing', 'Please select a source face image.');
+          return;
+        }
+        if (!targetPathVal) {
+          showWarning('Target Missing', 'Please select a target image or video.');
+          return;
+        }
+
+        const targetFilename = targetPathVal.split(/[\\/]/).pop();
+        const sourceFilename = sourcePathVal.split(/[\\/]/).pop() || 'N/A';
+        const activeOrder = selectorOrderSelect ? selectorOrderSelect.value : 'large-small';
+        
+        const jobId = 'ff_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        const capturedSettings = captureFacefusionSettings();
+
+        ffJobHistoryList.push({
+          id: jobId,
+          timestamp: new Date(),
+          status: 'pending',
+          targetFilename: targetFilename,
+          outputFilename: 'Pending...',
+          sourceFilename: sourceFilename,
+          selectorOrder: activeOrder
+        });
+
+        facefusionQueue.push({ savedPath: targetPathVal, ffSettings: capturedSettings, jobId: jobId });
+        console.log(`[FaceFusion Queue] Added manual run to queue: ${targetPathVal}. Total items: ${facefusionQueue.length}`);
+        showToast('Added to Queue', `Manual run added to Face Fusion queue (${facefusionQueue.length} pending)`, 'info');
+        
+        refreshJobsListIfVisible();
+        return;
+      }
+
+      let envType, condaEnvName, condaPath, folderPath, pythonPath;
+      let processors, executionProvider, faceSwapperModel, faceSwapperPixelBoost;
+      let faceSwapperWeight, faceSelectorMode, faceSelectorOrder;
+      let sourcePath, targetPath;
+
+      if (currentFFSnapshot) {
+        envType = currentFFSnapshot.envType;
+        condaEnvName = currentFFSnapshot.condaEnvName;
+        condaPath = currentFFSnapshot.condaPath;
+        folderPath = currentFFSnapshot.folderPath;
+        pythonPath = currentFFSnapshot.pythonPath;
+        processors = currentFFSnapshot.processors;
+        executionProvider = currentFFSnapshot.executionProvider;
+        faceSwapperModel = currentFFSnapshot.faceSwapperModel;
+        faceSwapperPixelBoost = currentFFSnapshot.faceSwapperPixelBoost;
+        faceSwapperWeight = currentFFSnapshot.faceSwapperWeight;
+        faceSelectorMode = currentFFSnapshot.faceSelectorMode;
+        faceSelectorOrder = currentFFSnapshot.faceSelectorOrder;
+        sourcePath = currentFFSnapshot.sourcePath;
+        targetPath = ffTargetPath;
+        
+        currentFFSnapshot = null; // Clear snapshot immediately
+      } else {
+        envType = ffEnvTypeSelect ? ffEnvTypeSelect.value : 'conda';
+        condaEnvName = condaEnvInput ? condaEnvInput.value.trim() : 'facefusion';
+        condaPath = ffCondaPathInput ? ffCondaPathInput.value.trim() : '';
+        folderPath = ffFolderInput.value.trim();
+        pythonPath = ffPythonInput.value.trim();
+        
+        processors = [];
+        if (cbSwapper && cbSwapper.checked) processors.push('face_swapper');
+        if (cbEnhancer && cbEnhancer.checked) processors.push('face_enhancer');
+        if (cbLipSyncer && cbLipSyncer.checked) processors.push('lip_syncer');
+        
+        executionProvider = selectProvider ? selectProvider.value : 'cuda';
+        faceSwapperModel = swapperModelSelect ? swapperModelSelect.value : 'inswapper_128';
+        faceSwapperPixelBoost = swapperPixelBoostSelect ? swapperPixelBoostSelect.value : '';
+        faceSwapperWeight = swapperWeightNumber ? parseFloat(swapperWeightNumber.value) : 1.0;
+        faceSelectorMode = selectorModeSelect ? selectorModeSelect.value : 'reference';
+        faceSelectorOrder = selectorOrderSelect ? selectorOrderSelect.value : 'large-small';
+        
+        sourcePath = ffSourcePath;
+        targetPath = ffTargetPath;
+      }
 
       if (window.api && typeof window.api.logDebug === 'function') {
-        window.api.logDebug({ message: `ff-run-click: envType=${envType}, condaEnvName=${condaEnvName}, condaPath=${condaPath}, folderPath=${folderPath}, pythonPath=${pythonPath}` });
+        window.api.logDebug({ message: `ff-run-click (hasSnapshot: ${!currentFFSnapshot}): envType=${envType}, condaEnvName=${condaEnvName}, condaPath=${condaPath}, folderPath=${folderPath}, pythonPath=${pythonPath}` });
       }
 
       const showError = (title, msg) => {
@@ -4851,11 +5746,11 @@ function initFacefusionTab() {
           return;
         }
       }
-      if (!ffSourcePath) {
+      if (!sourcePath) {
         showWarning('Source Missing', 'Please select a source face image.');
         return;
       }
-      if (!ffTargetPath) {
+      if (!targetPath) {
         showWarning('Target Missing', 'Please select a target image or video.');
         return;
       }
@@ -4863,17 +5758,47 @@ function initFacefusionTab() {
       // Compute output file path:
       // If outputFolderPath (the main app output setting) is configured, save there.
       // Else, save in the same directory as the target media file.
-      const targetExt = ffTargetPath.split('.').pop();
-      const targetName = ffTargetPath.split(/[\\/]/).pop().replace(/\.[^/.]+$/, '');
+      const targetExt = targetPath.split('.').pop();
+      const targetName = targetPath.split(/[\\/]/).pop().replace(/\.[^/.]+$/, '');
       
       let outDir = outputFolderPath;
       if (!outDir) {
         // Fallback to target media directory
-        outDir = ffTargetPath.substring(0, ffTargetPath.lastIndexOf('\\'));
+        outDir = targetPath.substring(0, targetPath.lastIndexOf('\\'));
         if (!outDir) {
-          outDir = ffTargetPath.substring(0, ffTargetPath.lastIndexOf('/'));
+          outDir = targetPath.substring(0, targetPath.lastIndexOf('/'));
         }
       }
+
+      // Check / assign Face Fusion job history state
+      let jobId = currentFFJobId;
+      if (!jobId) {
+        // This is a manual job!
+        jobId = 'ff_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        const targetFilename = targetPath.split(/[\\/]/).pop();
+        const sourceFilename = sourcePath.split(/[\\/]/).pop() || 'N/A';
+        const selectorOrderVal = faceSelectorOrder || '-';
+        
+        ffJobHistoryList.push({
+          id: jobId,
+          timestamp: new Date(),
+          status: 'running',
+          targetFilename: targetFilename,
+          outputFilename: 'Running...',
+          sourceFilename: sourceFilename,
+          selectorOrder: selectorOrderVal
+        });
+        refreshJobsListIfVisible();
+      } else {
+        // Queued job starts running now
+        const job = ffJobHistoryList.find(j => j.id === jobId);
+        if (job) {
+          job.status = 'running';
+          job.outputFilename = 'Running...';
+          refreshJobsListIfVisible();
+        }
+      }
+      currentFFJobId = jobId;
 
       let index = 1;
       let outputFilename = '';
@@ -4892,21 +5817,18 @@ function initFacefusionTab() {
       
       ffLastOutputPath = outPath;
 
-      // Collect active processors
-      const processors = [];
-      if (cbSwapper && cbSwapper.checked) processors.push('face_swapper');
-      if (cbEnhancer && cbEnhancer.checked) processors.push('face_enhancer');
-      if (cbLipSyncer && cbLipSyncer.checked) processors.push('lip_syncer');
+      const activeJob = ffJobHistoryList.find(j => j.id === currentFFJobId);
+      if (activeJob) {
+        activeJob.outputFilename = outputFilename;
+        refreshJobsListIfVisible();
+      }
 
       if (processors.length === 0) {
         showWarning('Processors Missing', 'Please select at least one frame processor (e.g. face_swapper).');
         return;
       }
 
-      const executionProvider = selectProvider ? selectProvider.value : 'cuda';
-
       // Reset and prepare UI
-      if (btnRun) btnRun.disabled = true;
       if (btnStop) {
         btnStop.disabled = false;
         btnStop.classList.remove('btn-disabled');
@@ -4922,14 +5844,10 @@ function initFacefusionTab() {
       if (outputVidContainer) outputVidContainer.classList.add('hidden');
       if (btnOpenViewer) btnOpenViewer.disabled = true;
 
-      const faceSwapperModel = swapperModelSelect ? swapperModelSelect.value : 'inswapper_128';
-      const faceSwapperPixelBoost = swapperPixelBoostSelect ? swapperPixelBoostSelect.value : '';
-      const faceSwapperWeight = swapperWeightNumber ? parseFloat(swapperWeightNumber.value) : 1.0;
-      const faceSelectorMode = selectorModeSelect ? selectorModeSelect.value : 'reference';
-      const faceSelectorOrder = selectorOrderSelect ? selectorOrderSelect.value : 'large-small';
-
       let timerInterval = null;
       try {
+        isFacefusionRunning = true;
+        updateFFWorkingStatus(true);
         const startTime = Date.now();
         if (timeText) timeText.textContent = '0s';
         timerInterval = setInterval(() => {
@@ -4943,8 +5861,8 @@ function initFacefusionTab() {
           condaPath,
           facefusionPath: folderPath,
           pythonPath,
-          sourcePath: ffSourcePath,
-          targetPath: ffTargetPath,
+          sourcePath: sourcePath,
+          targetPath: targetPath,
           outputPath: outPath,
           processors,
           executionProviders: [executionProvider],
@@ -4954,6 +5872,9 @@ function initFacefusionTab() {
           faceSelectorMode,
           faceSelectorOrder
         });
+
+        isFacefusionRunning = false;
+        updateFFWorkingStatus(false);
 
         if (timerInterval) clearInterval(timerInterval);
         const elapsedTotalMs = Date.now() - startTime;
@@ -4965,6 +5886,21 @@ function initFacefusionTab() {
           btnStop.disabled = true;
           btnStop.classList.add('btn-disabled');
         }
+
+        // Update current job status in history
+        const job = ffJobHistoryList.find(j => j.id === currentFFJobId);
+        if (job) {
+          if (result.ok) {
+            job.status = 'completed';
+          } else if (job.status !== 'interrupted') {
+            job.status = 'failed';
+          }
+          refreshJobsListIfVisible();
+        }
+
+        currentFFJobId = null;
+
+        // Process next queue item
         checkAndProcessFacefusionQueue();
 
         if (result.ok) {
@@ -4996,6 +5932,8 @@ function initFacefusionTab() {
           showToast('Facefusion Failed', result.error || 'Subprocess exited with an error code.', 'error');
         }
       } catch (err) {
+        isFacefusionRunning = false;
+        updateFFWorkingStatus(false);
         if (timerInterval) clearInterval(timerInterval);
         if (btnRun) btnRun.disabled = false;
         if (btnStop) {
@@ -5004,6 +5942,16 @@ function initFacefusionTab() {
         }
         if (statusText) statusText.textContent = 'Failed';
         showToast('Process Error', err.message, 'error');
+
+        // Update current job status in history
+        const job = ffJobHistoryList.find(j => j.id === currentFFJobId);
+        if (job && job.status !== 'interrupted') {
+          job.status = 'failed';
+          refreshJobsListIfVisible();
+        }
+        
+        currentFFJobId = null;
+
         checkAndProcessFacefusionQueue();
       }
     });
@@ -5013,6 +5961,11 @@ function initFacefusionTab() {
   if (btnStop) {
     btnStop.addEventListener('click', async () => {
       try {
+        const job = ffJobHistoryList.find(j => j.id === currentFFJobId);
+        if (job) {
+          job.status = 'interrupted';
+          refreshJobsListIfVisible();
+        }
         const result = await window.api.stopFacefusion();
         if (result.ok) {
           if (statusText) statusText.textContent = 'Stopped';
@@ -5370,6 +6323,190 @@ function initImportPrompt() {
       }
     });
   }
+}
+
+function initClearSlots() {
+  const btnClearSlots = document.getElementById('btn-clear-slots');
+  if (btnClearSlots) {
+    btnClearSlots.addEventListener('click', () => {
+      if (!currentWorkflow) {
+        alert('Please load a workflow JSON first.');
+        return;
+      }
+
+      // Loop through all currently active image slots and clear/reset their workflow node values
+      imageSlots.forEach(slotState => {
+        if (!slotState.nodeId) return;
+
+        // Clear image filename in the workflow JSON
+        if (currentWorkflow[slotState.nodeId] && currentWorkflow[slotState.nodeId].inputs) {
+          currentWorkflow[slotState.nodeId].inputs.image = "";
+        }
+
+        // Reset rotation to 'none' in the workflow JSON
+        if (slotState.rotateNodeId && currentWorkflow[slotState.rotateNodeId] && currentWorkflow[slotState.rotateNodeId].inputs) {
+          currentWorkflow[slotState.rotateNodeId].inputs.rotation = "none";
+        }
+
+        // Reset flip to 'none' in the workflow JSON
+        if (slotState.flipNodeId && currentWorkflow[slotState.flipNodeId] && currentWorkflow[slotState.flipNodeId].inputs) {
+          currentWorkflow[slotState.flipNodeId].inputs.flip_method = "none";
+        }
+
+        // Reset state in localStorage
+        localStorage.setItem(`img_slot_${slotState.slotIndex}_flip`, "none");
+        localStorage.setItem(`img_slot_${slotState.slotIndex}_enabled`, "false");
+        localStorage.removeItem(`last_image_path_slot_${slotState.slotIndex}`);
+      });
+
+      // Save the cleared workflow back to localStorage
+      localStorage.setItem('comfyui_workflow_json', JSON.stringify(currentWorkflow));
+
+      // Regenerate the dynamic params UI to fully refresh the DOM with empty states
+      generateDynamicParamsUI(currentWorkflow);
+
+      // Toast notification for user feedback
+      showToast('Slots Cleared', 'All image slots cleared and states reset successfully.', 'info');
+    });
+  }
+}
+
+function initQwenAutoAspectControls() {
+  const autoCheckbox = document.getElementById('qwen-auto-aspect-ratio');
+  const slotSelect = document.getElementById('qwen-auto-aspect-ratio-slot');
+  const settingsGroup = document.getElementById('qwen-auto-aspect-ratio-settings-group');
+
+  if (!autoCheckbox || !slotSelect) return;
+
+  // Restore states
+  const savedAuto = localStorage.getItem('qwen_auto_aspect_ratio') === 'true';
+  const savedSlot = localStorage.getItem('qwen_auto_aspect_ratio_slot') || '0';
+
+  autoCheckbox.checked = savedAuto;
+  slotSelect.value = savedSlot;
+
+  const toggleGroup = () => {
+    const sidebarSelect = document.getElementById('sidebar-qwen-aspect-ratio');
+    if (autoCheckbox.checked) {
+      if (settingsGroup) settingsGroup.style.display = 'block';
+      if (sidebarSelect) sidebarSelect.disabled = true;
+      if (currentWorkflow && qwenCanvasNodeId) {
+        const mainSelect = document.getElementById(`param-${qwenCanvasNodeId}-aspect_ratio`);
+        if (mainSelect) mainSelect.disabled = true;
+      }
+      updateQwenAspectFromSlot();
+    } else {
+      if (settingsGroup) settingsGroup.style.display = 'none';
+      if (sidebarSelect) sidebarSelect.disabled = false;
+      if (currentWorkflow && qwenCanvasNodeId) {
+        const mainSelect = document.getElementById(`param-${qwenCanvasNodeId}-aspect_ratio`);
+        if (mainSelect) mainSelect.disabled = false;
+      }
+    }
+  };
+
+  autoCheckbox.addEventListener('change', () => {
+    localStorage.setItem('qwen_auto_aspect_ratio', autoCheckbox.checked);
+    toggleGroup();
+  });
+
+  slotSelect.addEventListener('change', () => {
+    localStorage.setItem('qwen_auto_aspect_ratio_slot', slotSelect.value);
+    updateQwenAspectFromSlot();
+  });
+
+  // Call toggleGroup initially to set correct state
+  toggleGroup();
+}
+
+function updateQwenAspectFromSlot() {
+  const autoCheckbox = document.getElementById('qwen-auto-aspect-ratio');
+  if (!autoCheckbox || !autoCheckbox.checked) return;
+
+  const slotSelect = document.getElementById('qwen-auto-aspect-ratio-slot');
+  if (!slotSelect) return;
+
+  const slotIndex = parseInt(slotSelect.value);
+  if (isNaN(slotIndex) || slotIndex < 0 || slotIndex >= imageSlots.length) return;
+
+  const slotState = imageSlots[slotIndex];
+  if (!slotState) return;
+
+  const img = document.querySelector(`.image-slot[data-slot-index="${slotIndex}"] .image-picker-preview img`);
+  if (!img) return;
+
+  const performSync = () => {
+    if (!img.naturalWidth || !img.naturalHeight) return;
+    
+    let ratio = img.naturalWidth / img.naturalHeight;
+    if (slotState.rotation === '90' || slotState.rotation === '270') {
+      ratio = img.naturalHeight / img.naturalWidth;
+    }
+
+    // Now find the closest matching option in the sidebar selector
+    const sidebarSelect = document.getElementById('sidebar-qwen-aspect-ratio');
+    if (!sidebarSelect || sidebarSelect.options.length === 0) return;
+
+    let closestOptionValue = null;
+    let minDiff = Infinity;
+
+    Array.from(sidebarSelect.options).forEach(opt => {
+      const optRatio = getRatioFromOptionText(opt.textContent || opt.value);
+      if (optRatio !== null) {
+        const diff = Math.abs(ratio - optRatio);
+        if (diff < minDiff) {
+          minDiff = diff;
+          closestOptionValue = opt.value;
+        }
+      }
+    });
+
+    const mainSelect = qwenCanvasNodeId ? document.getElementById(`param-${qwenCanvasNodeId}-aspect_ratio`) : null;
+    const needsUpdate = (closestOptionValue !== null) && 
+                        ((sidebarSelect.value !== closestOptionValue) || 
+                         (mainSelect && mainSelect.value !== closestOptionValue));
+
+    if (needsUpdate) {
+      sidebarSelect.value = closestOptionValue;
+      
+      // Update values and dispatch events
+      if (currentWorkflow && qwenCanvasNodeId && mainSelect) {
+        const originalDisabled = mainSelect.disabled;
+        mainSelect.disabled = false;
+        mainSelect.value = closestOptionValue;
+        mainSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        mainSelect.disabled = originalDisabled;
+      }
+      
+      // Also update sidebar Select
+      const origSidebarDisabled = sidebarSelect.disabled;
+      sidebarSelect.disabled = false;
+      sidebarSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      sidebarSelect.disabled = origSidebarDisabled;
+    }
+  };
+
+  if (img.complete) {
+    performSync();
+  } else {
+    img.addEventListener('load', performSync, { once: true });
+  }
+}
+
+function getRatioFromOptionText(text) {
+  const match = text.match(/(\d+)\s*[:x*\/\\-]\s*(\d+)/i);
+  if (match) {
+    const w = parseFloat(match[1]);
+    const h = parseFloat(match[2]);
+    if (w > 0 && h > 0) {
+      return w / h;
+    }
+  }
+  const single = parseFloat(text);
+  if (!isNaN(single) && single > 0) {
+    return single;
+  }
+  return null;
 }
 
 

@@ -50,6 +50,9 @@ contextBridge.exposeInMainWorld('api', {
   onWatchFolderNewImage: (callback) => {
     ipcRenderer.removeAllListeners('watch-folder-new-image');
     ipcRenderer.on('watch-folder-new-image', (event, data) => callback(data));
-  }
+  },
+  selectSaveWorkflowFile: (defaultPath) => ipcRenderer.invoke('select-save-workflow-file', defaultPath),
+  combineWorkflows: (options) => ipcRenderer.invoke('combine-workflows', options),
+  updateMinimizeToTray: (enabled) => ipcRenderer.send('update-minimize-to-tray', enabled)
 });
 
