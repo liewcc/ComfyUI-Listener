@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu } = require('elec
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const zlib = require('zlib');
 
 // ─── PNG Metadata Helpers ──────────────────────────────────────────────────────
 // CRC32 lookup table for PNG chunk integrity
@@ -79,15 +80,46 @@ function extractPngTextChunks(pngBuf) {
       const data = pngBuf.slice(dataStart, dataEnd);
       const nil  = data.indexOf(0);
       if (nil !== -1) result[data.slice(0, nil).toString('latin1')] = data.slice(nil + 1).toString('latin1');
+    } else if (chunkType === 'zTXt') {
+      const data = pngBuf.slice(dataStart, dataEnd);
+      const nil  = data.indexOf(0);
+      if (nil !== -1) {
+        const kw = data.slice(0, nil).toString('latin1');
+        const comprMethod = data[nil + 1];
+        const textBuf = data.slice(nil + 2);
+        let textVal;
+        try {
+          textVal = zlib.inflateSync(textBuf).toString('utf8');
+        } catch (zlibErr) {
+          console.error(`Failed to decompress zTXt chunk ${kw}:`, zlibErr);
+          textVal = textBuf.toString('utf8'); // fallback
+        }
+        result[kw] = textVal;
+      }
     } else if (chunkType === 'iTXt') {
       const data = pngBuf.slice(dataStart, dataEnd);
       const nil  = data.indexOf(0);
       if (nil !== -1) {
         const kw = data.slice(0, nil).toString('latin1');
+        const comprFlag = data[nil + 1];
+        const comprMethod = data[nil + 2];
         let p = nil + 3; // skip comprFlag, comprMethod
         p = data.indexOf(0, p) + 1; // skip language tag
         p = data.indexOf(0, p) + 1; // skip translated keyword
-        result[kw] = data.slice(p).toString('utf8');
+        
+        const textBuf = data.slice(p);
+        let textVal;
+        if (comprFlag === 1) {
+          try {
+            textVal = zlib.inflateSync(textBuf).toString('utf8');
+          } catch (zlibErr) {
+            console.error(`Failed to decompress iTXt chunk ${kw}:`, zlibErr);
+            textVal = textBuf.toString('utf8'); // fallback
+          }
+        } else {
+          textVal = textBuf.toString('utf8');
+        }
+        result[kw] = textVal;
       }
     } else if (chunkType === 'IEND') break;
 
@@ -793,6 +825,33 @@ ipcMain.handle('run-facefusion', async (event, { envType, condaEnvName, condaPat
       activeFacefusionProcess.on('close', (code) => {
         activeFacefusionProcess = null;
         event.sender.send('facefusion-log', { type: 'system', text: `\nProcess finished with exit code ${code}\n` });
+        
+        if (code === 0) {
+          try {
+            const targetExt = path.extname(targetPath).toLowerCase();
+            const outputExt = path.extname(outputPath).toLowerCase();
+            if (targetExt === '.png' && outputExt === '.png' && fs.existsSync(targetPath) && fs.existsSync(outputPath)) {
+              const targetBuf = fs.readFileSync(targetPath);
+              const targetMetadata = extractPngTextChunks(targetBuf);
+              if (targetMetadata && Object.keys(targetMetadata).length > 0) {
+                const outputBuf = fs.readFileSync(outputPath);
+                const updatedBuf = injectPngMetadata(outputBuf, targetMetadata);
+                fs.writeFileSync(outputPath, updatedBuf);
+                event.sender.send('facefusion-log', { 
+                  type: 'system', 
+                  text: `Successfully injected ComfyUI workflow metadata from target image into face fusion output PNG.\n` 
+                });
+              }
+            }
+          } catch (metaErr) {
+            console.error('Failed to inject metadata from target image:', metaErr);
+            event.sender.send('facefusion-log', { 
+              type: 'system', 
+              text: `Warning: Failed to inject workflow metadata: ${metaErr.message}\n` 
+            });
+          }
+        }
+        
         resolve({ ok: code === 0, code });
       });
 
