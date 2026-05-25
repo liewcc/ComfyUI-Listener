@@ -3979,13 +3979,19 @@ function initGeneration() {
           myQueuedPromptIds.add(result.prompt_id);
           promptSamplerCountsMap[result.prompt_id] = newSamplerCount;
           const ffSettings = captureFacefusionSettings();
+          const prefixEl = document.getElementById('autosave-prefix');
+          const paddingEl = document.getElementById('autosave-padding');
+          const startingNoEl = document.getElementById('autosave-starting-no');
+          const sourceEl = document.getElementById('autosave-original-source');
+          const delimEl = document.getElementById('autosave-delimiter');
+
           const autosaveSettings = {
-            prefix: document.getElementById('autosave-prefix')?.value.trim() || 'autosave',
+            prefix: prefixEl ? prefixEl.value.trim() : 'autosave',
             insertOriginal: document.getElementById('autosave-insert-original')?.checked ?? true,
-            padding: parseInt(document.getElementById('autosave-padding')?.value, 10) || 4,
-            startingNo: parseInt(document.getElementById('autosave-starting-no')?.value, 10) || 1,
-            source: document.getElementById('autosave-original-source')?.value || 'slot1',
-            delimiter: document.getElementById('autosave-delimiter')?.value || '_'
+            padding: paddingEl ? (isNaN(parseInt(paddingEl.value, 10)) ? 4 : parseInt(paddingEl.value, 10)) : 4,
+            startingNo: startingNoEl ? (isNaN(parseInt(startingNoEl.value, 10)) ? 1 : parseInt(startingNoEl.value, 10)) : 1,
+            source: sourceEl ? sourceEl.value : 'slot1',
+            delimiter: delimEl ? delimEl.value : '_'
           };
           
           promptJobStates.set(result.prompt_id, {
