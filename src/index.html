@@ -200,18 +200,7 @@
         </div>
       </div>
 
-      <!-- General Settings -->
-      <div class="connection-card general-settings-card">
-        <div class="card-header">
-          <h3>General Settings</h3>
-        </div>
-        <div class="card-body">
-          <div class="checkbox-row" style="margin-bottom: 0;">
-            <input type="checkbox" id="minimize-to-tray" class="autosave-checkbox">
-            <label for="minimize-to-tray">Minimize to Tray on Close</label>
-          </div>
-        </div>
-      </div>
+
     </aside>
 
     <!-- Main Content Area -->
@@ -456,6 +445,22 @@
               </div>
               <div class="panel-body scrollable">
                 <div id="qwen-canvas-params-container" class="params-container"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Third Column (General Settings) -->
+          <div class="grid-col flex-col gap-2">
+            <div class="panel params-panel standalone-params-panel" id="general-settings-panel">
+              <div class="panel-header">
+                <div class="panel-title-icon general-icon" style="background-color: var(--accent);"></div>
+                <h3>General Settings</h3>
+              </div>
+              <div class="panel-body">
+                <div class="checkbox-row" style="margin-bottom: 0;">
+                  <input type="checkbox" id="minimize-to-tray" class="autosave-checkbox">
+                  <label for="minimize-to-tray">Minimize to Tray on Close</label>
+                </div>
               </div>
             </div>
           </div>

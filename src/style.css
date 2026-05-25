@@ -402,10 +402,14 @@ body {
 .dashboard-grid {
   display: grid;
   grid-template-columns: 460px 1fr;
-  gap: 24px;
+  gap: 12px;
   flex-grow: 1;
   min-height: 0;
   height: calc(100% - 70px);
+}
+
+#tab-parameters .dashboard-grid {
+  grid-template-columns: 460px 1fr 320px;
 }
 
 .grid-col {
@@ -419,7 +423,7 @@ body {
 }
 
 .gap-2 {
-  gap: 20px;
+  gap: 12px;
 }
 
 /* Panel Styles */
@@ -435,7 +439,6 @@ body {
 
 .panel-header {
   padding: 16px 20px;
-  border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
   gap: 10px;
@@ -486,7 +489,7 @@ body {
 .tab-pane .workflow-panel {
   max-width: 900px;
   width: 100%;
-  margin-bottom: 24px;
+  margin-bottom: 0;
 }
 
 .workflow-uploader {
@@ -632,7 +635,6 @@ body {
   font-size: 13px;
   font-weight: 700;
   color: hsl(210, 85%, 70%);
-  border-bottom: 1px solid hsla(210, 70%, 55%, 0.15);
   padding-bottom: 8px;
   margin-bottom: 4px;
   display: flex;
@@ -648,7 +650,6 @@ body {
 }
 
 .ksampler-group .param-item {
-  border-bottom: 1px solid hsla(210, 70%, 55%, 0.1);
   padding-bottom: 10px;
 }
 
@@ -660,7 +661,7 @@ body {
 /* Model Loader Panel Card */
 #loaders-panel {
   border-left: 3px solid hsl(260, 80%, 55%);
-  margin-bottom: 24px;
+  margin-bottom: 0;
   transition: var(--transition);
 }
 
@@ -681,7 +682,7 @@ body {
 /* Qwen Canvas Panel Card */
 #qwen-canvas-panel {
   border-left: 3px solid hsl(35, 80%, 55%);
-  margin-bottom: 24px;
+  margin-bottom: 0;
   transition: var(--transition);
 }
 
@@ -699,8 +700,28 @@ body {
   background-color: hsl(35, 80%, 55%) !important;
 }
 
+/* General Settings Panel Card */
+#general-settings-panel {
+  border-left: 3px solid hsl(140, 80%, 50%);
+  margin-bottom: 0;
+  transition: var(--transition);
+}
+
+#general-settings-panel:focus-within {
+  border-color: hsla(140, 80%, 60%, 0.7);
+  box-shadow: 0 0 0 3px hsla(140, 80%, 60%, 0.1),
+              0 4px 20px hsla(140, 80%, 60%, 0.15);
+}
+
+#general-settings-panel .panel-header h3 {
+  color: hsl(140, 85%, 65%);
+}
+
+#general-settings-panel .panel-title-icon {
+  background-color: hsl(140, 80%, 50%) !important;
+}
+
 .param-item {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
   padding-bottom: 14px;
 }
 
@@ -1108,7 +1129,7 @@ body {
 
 /* Output Settings Card Styles */
 .automation-card {
-  margin-top: 20px;
+  margin-top: 12px;
 }
 
 .output-settings-card {
@@ -1172,7 +1193,6 @@ body {
 .autosave-settings-group {
   margin-top: 12px;
   padding-top: 12px;
-  border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -1627,7 +1647,6 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 4px 10px 4px 14px;
-  border-top: 1px solid var(--border);
   background-color: rgba(0, 0, 0, 0.15);
 }
 
@@ -1736,7 +1755,6 @@ body {
   gap: 6px;
   margin-top: 8px;
   padding-top: 8px;
-  border-top: 1px solid var(--border);
 }
 .webui-wf-name {
   font-size: 11px;
@@ -2028,6 +2046,55 @@ body {
 .input-group input[type="range"]::-moz-range-thumb:hover {
   transform: scale(1.2);
   background: var(--accent-hover);
+}
+
+/* Job History Modal Table Styles */
+.jobs-table-container table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.job-filename-cell {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+}
+
+/* Badges for Job Status */
+.job-status-badge {
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  display: inline-block;
+}
+
+.job-status-completed {
+  background-color: hsla(142, 70%, 50%, 0.12);
+  color: hsl(142, 75%, 45%);
+  border: 1px solid hsla(142, 70%, 50%, 0.25);
+}
+
+.job-status-running {
+  background-color: hsla(350, 80%, 55%, 0.12);
+  color: hsl(350, 85%, 60%);
+  border: 1px solid hsla(350, 80%, 55%, 0.25);
+}
+
+.job-status-pending {
+  background-color: hsla(200, 100%, 50%, 0.12);
+  color: hsl(200, 100%, 50%);
+  border: 1px solid hsla(200, 100%, 50%, 0.25);
+}
+
+.job-status-failed,
+.job-status-interrupted {
+  background-color: rgba(255, 255, 255, 0.05);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
 }
 
 
