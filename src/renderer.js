@@ -3440,13 +3440,21 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
       refreshJobsListIfVisible();
     }
   }
-  // Determine synchronously if we should auto-save for this prompt to prevent race conditions
+  // Determine synchronously if we should auto-save for this prompt to prevent race conditions.
+  // Use the output folder path that was snapshotted when the job was submitted, so that any
+  // changes the user makes to Output Settings while the job runs don't affect where this
+  // particular result is saved.
+  const jobState = promptId ? promptJobStates.get(promptId) : null;
+  const effectiveOutputFolderPath = (jobState && jobState.outputFolderPath != null)
+    ? jobState.outputFolderPath
+    : outputFolderPath;
+
   let shouldAutoSave = false;
-  if (outputFolderPath && promptId && savedForPromptId !== promptId) {
+  if (effectiveOutputFolderPath && promptId && savedForPromptId !== promptId) {
     savedForPromptId = promptId; // Mark as saved for this prompt immediately
     shouldAutoSave = true;
   }
-  console.log(`[displayGeneratedImage] file=${filename} promptId=${promptId} savedForPromptId=${savedForPromptId} outputFolderPath=${!!outputFolderPath} shouldAutoSave=${shouldAutoSave}`);
+  console.log(`[displayGeneratedImage] file=${filename} promptId=${promptId} savedForPromptId=${savedForPromptId} effectiveOutputFolderPath=${!!effectiveOutputFolderPath} shouldAutoSave=${shouldAutoSave}`);
 
   const rand = Math.random();
   // Build the canonical ComfyUI image URL
@@ -3475,7 +3483,7 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
   
   openBtn.onclick = async () => {
     // If auto-save to custom folder is active, try to open the saved file in the user's custom output folder
-    if (outputFolderPath && promptId) {
+    if (effectiveOutputFolderPath && promptId) {
       if (promptSavedPath) {
         window.api.openPath({ path: promptSavedPath });
       } else {
@@ -3576,7 +3584,7 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
       parts.push(formattedNo);
 
       const testFilename = parts.filter(Boolean).join(delimiter) + ext;
-      const exists = await window.api.checkFileExists({ folderPath: outputFolderPath, filename: testFilename });
+      const exists = await window.api.checkFileExists({ folderPath: effectiveOutputFolderPath, filename: testFilename });
       if (!exists) {
         break;
       }
@@ -3602,7 +3610,7 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
     try {
       const result = await window.api.saveImageToFolder({
         url: downloadUrl,
-        folderPath: outputFolderPath,
+        folderPath: effectiveOutputFolderPath,
         filename: customFilename,
         metadata: pngMetadata,
         sourceImageUrl
@@ -3650,7 +3658,7 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
   } else {
     // If output folder is not configured but auto-send-ff is checked, warn the user
     const autoSendFf = document.getElementById('auto-send-ff');
-    if (autoSendFf && autoSendFf.checked && !outputFolderPath) {
+    if (autoSendFf && autoSendFf.checked && !effectiveOutputFolderPath) {
       showToast('Face Fusion Trigger Failed', 'Please configure an Output Folder in Output Setting to enable auto Face Fusion processing.', 'warning');
     }
   }
@@ -4017,7 +4025,10 @@ function initGeneration() {
             imageSlots: capturedImageSlots,
             workflow: workflowCopy,
             facefusionSettings: ffSettings,
-            autosaveSettings: autosaveSettings
+            autosaveSettings: autosaveSettings,
+            // Snapshot the output folder path at run time so that changes made by the user
+            // while the job is in-flight do not redirect the save to the wrong folder.
+            outputFolderPath: outputFolderPath
           });
 
           const autoSendFf = document.getElementById('auto-send-ff');
