@@ -373,6 +373,20 @@ function updateConnectionStatus(state, label) {
   
   statusDot.className = `status-dot ${state}`;
   statusText.textContent = label;
+
+  // Sync the mini connection badge in the Execution Monitor header
+  const monitorBadge = document.getElementById('monitor-connection-badge');
+  if (monitorBadge) {
+    monitorBadge.className = 'job-status-badge ' + (
+      state === 'connected'  ? 'conn-badge-connected'   :
+      state === 'connecting' ? 'conn-badge-connecting'  :
+                               'conn-badge-disconnected'
+    );
+    monitorBadge.textContent =
+      state === 'connected'  ? 'Connected'    :
+      state === 'connecting' ? 'Connecting…'  :
+                               'Disconnected';
+  }
   
   const btnRun = document.getElementById('btn-run');
   const btnStop = document.getElementById('btn-stop');
@@ -2679,6 +2693,10 @@ function handleWebSocketMessage(data) {
 
         updateProgress(0, 0, 'Executing workflow...');
         startJobTimer();
+        const ffMonitorTimeEl = document.getElementById('ff-monitor-time');
+        if (ffMonitorTimeEl) {
+          ffMonitorTimeEl.textContent = '0s';
+        }
         document.getElementById('display-empty').classList.add('hidden');
         document.getElementById('display-loading').classList.remove('hidden');
         document.getElementById('display-image-container').classList.add('hidden');
@@ -2973,7 +2991,7 @@ function handleWebSocketMessage(data) {
 function startJobTimer() {
   stopJobTimer(); // Clear any existing timer first
   jobStartTime = Date.now();
-  const jobTimeEl = document.getElementById('job-time');
+  const jobTimeEl = document.getElementById('comfy-time');
   if (jobTimeEl) {
     jobTimeEl.textContent = '0s';
   }
@@ -5856,9 +5874,14 @@ function initFacefusionTab() {
         updateFFWorkingStatus(true);
         const startTime = Date.now();
         if (timeText) timeText.textContent = '0s';
+        const ffMonitorTimeEl = document.getElementById('ff-monitor-time');
+        if (ffMonitorTimeEl) ffMonitorTimeEl.textContent = '0s';
+
         timerInterval = setInterval(() => {
           const elapsedMs = Date.now() - startTime;
-          if (timeText) timeText.textContent = formatJobTime(elapsedMs);
+          const formatted = formatJobTime(elapsedMs);
+          if (timeText) timeText.textContent = formatted;
+          if (ffMonitorTimeEl) ffMonitorTimeEl.textContent = formatted;
         }, 100);
 
         const result = await window.api.runFacefusion({
@@ -5884,7 +5907,9 @@ function initFacefusionTab() {
 
         if (timerInterval) clearInterval(timerInterval);
         const elapsedTotalMs = Date.now() - startTime;
-        if (timeText) timeText.textContent = formatJobTime(elapsedTotalMs);
+        const formattedTotal = formatJobTime(elapsedTotalMs);
+        if (timeText) timeText.textContent = formattedTotal;
+        if (ffMonitorTimeEl) ffMonitorTimeEl.textContent = formattedTotal;
 
         // Restore UI actions
         if (btnRun) btnRun.disabled = false;

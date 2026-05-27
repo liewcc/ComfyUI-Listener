@@ -807,7 +807,7 @@ body {
 
 .progress-details {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 16px;
   margin-bottom: 16px;
 }
@@ -2097,4 +2097,21 @@ body {
   border: 1px solid var(--border);
 }
 
+/* Connection status badge — Execution Monitor header */
+.conn-badge-connected {
+  background-color: hsla(142, 70%, 50%, 0.12);
+  color: hsl(142, 75%, 45%);
+  border: 1px solid hsla(142, 70%, 50%, 0.25);
+}
 
+.conn-badge-disconnected {
+  background-color: hsla(350, 80%, 55%, 0.12);
+  color: hsl(350, 85%, 60%);
+  border: 1px solid hsla(350, 80%, 55%, 0.25);
+}
+
+.conn-badge-connecting {
+  background-color: hsla(35, 90%, 55%, 0.12);
+  color: hsl(35, 95%, 60%);
+  border: 1px solid hsla(35, 90%, 55%, 0.25);
+}

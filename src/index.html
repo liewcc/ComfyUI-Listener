@@ -280,6 +280,7 @@
                     </svg>
                     <span>Jobs</span>
                   </button>
+                  <span id="monitor-connection-badge" class="job-status-badge conn-badge-disconnected" style="cursor: default;" title="ComfyUI connection status">Disconnected</span>
                   <span id="indicator-comfy" class="job-status-badge job-status-pending" style="font-size: 10px; padding: 3px 8px; border-radius: 8px; font-weight: 700; cursor: default;" title="ComfyUI status: Idle">ComfyUI: Idle</span>
                   <span id="indicator-ff" class="job-status-badge job-status-pending" style="font-size: 10px; padding: 3px 8px; border-radius: 8px; font-weight: 700; cursor: default;" title="Face Fusion status: Idle">Face Fusion: Idle</span>
                 </div>
@@ -295,8 +296,12 @@
                     <span class="detail-value" id="current-node">Idle</span>
                   </div>
                   <div class="detail-row">
-                    <span class="detail-label">Job Time:</span>
-                    <span class="detail-value" id="job-time">0s</span>
+                    <span class="detail-label">ComfyUI Time:</span>
+                    <span class="detail-value" id="comfy-time">0s</span>
+                  </div>
+                  <div class="detail-row">
+                    <span class="detail-label">Face Fusion Time:</span>
+                    <span class="detail-value" id="ff-monitor-time">0s</span>
                   </div>
                   <div class="detail-row">
                     <span class="detail-label">Progress:</span>
