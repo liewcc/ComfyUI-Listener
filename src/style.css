@@ -705,6 +705,8 @@ body {
   border-left: 3px solid hsl(195, 85%, 50%);
   margin-bottom: 0;
   transition: var(--transition);
+  flex-grow: 0;
+  flex-shrink: 0;
 }
 
 #scale-latent-panel:focus-within {
