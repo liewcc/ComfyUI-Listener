@@ -652,6 +652,11 @@ function initWorkflowLoader() {
       const qwenCountBadge = document.getElementById('qwen-params-count');
       if (qwenCountBadge) qwenCountBadge.textContent = '0 prompts';
 
+      const scaleLatentPanel = document.getElementById('scale-latent-panel');
+      if (scaleLatentPanel) scaleLatentPanel.classList.add('hidden');
+      const scaleLatentContainer = document.getElementById('scale-latent-params-container');
+      if (scaleLatentContainer) scaleLatentContainer.innerHTML = '';
+
       const inputImagesPanel = document.getElementById('input-images-panel');
       if (inputImagesPanel) inputImagesPanel.classList.add('hidden');
       const inputImagesContainer = document.getElementById('input-images-container');
@@ -1127,6 +1132,11 @@ function generateDynamicParamsUI(workflow) {
   if (loadersPanel) loadersPanel.classList.add('hidden');
   const qwenCanvasPanel = document.getElementById('qwen-canvas-panel');
   if (qwenCanvasPanel) qwenCanvasPanel.classList.add('hidden');
+  const scaleLatentPanel = document.getElementById('scale-latent-panel');
+  if (scaleLatentPanel) scaleLatentPanel.classList.add('hidden');
+
+  const scaleLatentContainer = document.getElementById('scale-latent-params-container');
+  if (scaleLatentContainer) scaleLatentContainer.innerHTML = '';
 
   paramMappings = [];
   imageSlots = [];
@@ -1250,6 +1260,53 @@ function generateDynamicParamsUI(workflow) {
 
   if (hasQwenCanvas && qwenCanvasPanel) {
     qwenCanvasPanel.classList.remove('hidden');
+  }
+
+  // --- Pre-scan: Find LatentUpscaleBy nodes ---
+  let hasScaleLatent = false;
+  for (const nodeId in workflow) {
+    const node = workflow[nodeId];
+    if (!node || !node.inputs) continue;
+    if (node.class_type === 'LatentUpscaleBy') {
+      hasScaleLatent = true;
+
+      // We want to render its inputs: upscale_method, scale_by
+      const inputsToRender = [
+        { key: 'upscale_method', label: 'Upscale Method', type: 'select' },
+        { key: 'scale_by', label: 'Scale By', type: 'number', step: 0.05 }
+      ];
+
+      inputsToRender.forEach(inp => {
+        const val = node.inputs[inp.key];
+        if (val !== undefined) {
+          paramCount++;
+          const paramId = `param-${nodeId}-${inp.key}`;
+
+          let paramEl;
+          if (inp.type === 'select') {
+            paramEl = createParamElement(paramId, inp.label, nodeId, inp.key, 'select', val, 1, 3, [val]);
+            populateLoaderChoices('LatentUpscaleBy', inp.key, paramId, val);
+          } else {
+            paramEl = createParamElement(paramId, inp.label, nodeId, inp.key, 'number', val, inp.step || 1);
+          }
+
+          if (scaleLatentContainer) {
+            scaleLatentContainer.appendChild(paramEl);
+          }
+
+          paramMappings.push({
+            nodeId: nodeId,
+            key: inp.key,
+            elementId: paramId,
+            type: inp.type === 'number' ? 'number' : 'string'
+          });
+        }
+      });
+    }
+  }
+
+  if (hasScaleLatent && scaleLatentPanel) {
+    scaleLatentPanel.classList.remove('hidden');
   }
 
   const sidebarQwenCard = document.getElementById('sidebar-qwen-canvas-card');
@@ -1900,7 +1957,7 @@ async function populateLoaderChoices(classType, key, selectElementId, defaultVal
 
 function refreshLoaderChoices() {
   if (!currentWorkflow) return;
-  const selectElements = document.querySelectorAll('#loaders-panel select, #qwen-canvas-panel select');
+  const selectElements = document.querySelectorAll('#loaders-panel select, #qwen-canvas-panel select, #scale-latent-panel select');
   selectElements.forEach(selectEl => {
     const match = selectEl.id.match(/^param-(\d+)-(.+)$/);
     if (match) {

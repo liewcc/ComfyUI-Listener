@@ -700,6 +700,27 @@ body {
   background-color: hsl(35, 80%, 55%) !important;
 }
 
+/* Scale Latent Panel Card */
+#scale-latent-panel {
+  border-left: 3px solid hsl(195, 85%, 50%);
+  margin-bottom: 0;
+  transition: var(--transition);
+}
+
+#scale-latent-panel:focus-within {
+  border-color: hsla(195, 85%, 60%, 0.7);
+  box-shadow: 0 0 0 3px hsla(195, 85%, 60%, 0.1),
+              0 4px 20px hsla(195, 85%, 60%, 0.15);
+}
+
+#scale-latent-panel .panel-header h3 {
+  color: hsl(195, 90%, 65%);
+}
+
+#scale-latent-panel .panel-title-icon {
+  background-color: hsl(195, 85%, 50%) !important;
+}
+
 /* General Settings Panel Card */
 #general-settings-panel {
   border-left: 3px solid hsl(140, 80%, 50%);
