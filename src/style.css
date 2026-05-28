@@ -2065,11 +2065,31 @@ body {
 .job-status-badge {
   padding: 3px 8px;
   border-radius: 12px;
-  font-size: 11px;
+  font-size: 11px !important;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.job-status-cell {
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+}
+
+/* Invisible placeholder keeps badge aligned when there is no cancel button */
+.job-cancel-placeholder {
   display: inline-block;
+  width: 18px;
+  height: 18px;
+  margin-right: 7px;
+  flex-shrink: 0;
 }
 
 .job-status-completed {
@@ -2096,6 +2116,46 @@ body {
   color: var(--text-muted);
   border: 1px solid var(--border);
 }
+
+/* Inline cancel button that appears next to the status badge for queued jobs */
+.job-cancel-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  flex-shrink: 0;
+  margin-right: 7px;
+  padding: 0;
+  border: 1px solid hsla(350, 80%, 55%, 0.35);
+  border-radius: 50%;
+  background: hsla(350, 80%, 55%, 0.08);
+  color: hsl(350, 85%, 65%);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  vertical-align: middle;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s, opacity 0.15s;
+  opacity: 0.7;
+}
+
+.job-cancel-btn:hover:not(:disabled) {
+  background: hsla(350, 80%, 55%, 0.22);
+  border-color: hsl(350, 85%, 60%);
+  opacity: 1;
+  transform: scale(1.15);
+}
+
+.job-cancel-btn:active:not(:disabled) {
+  transform: scale(0.9);
+}
+
+.job-cancel-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
 
 /* Connection status badge — Execution Monitor header */
 .conn-badge-connected {

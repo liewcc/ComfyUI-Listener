@@ -123,12 +123,16 @@ async function checkAndClearComfyHistory(promptId) {
   }
 
   if (isSaved && isCompleted) {
+    const state = promptJobStates.get(promptId);
+    const autosaveSnap = state ? state.autosaveSettings : null;
+    const shouldClear = autosaveSnap 
+      ? (autosaveSnap.clearHistory === 'true' || autosaveSnap.clearHistory === true)
+      : (document.getElementById('autosave-clear-history')?.checked ?? false);
+
     promptJobStates.delete(promptId);
     savedPromptIds.delete(promptId);
     completedPromptIds.delete(promptId);
 
-    const clearHistoryCheckbox = document.getElementById('autosave-clear-history');
-    const shouldClear = clearHistoryCheckbox ? clearHistoryCheckbox.checked : false;
     if (!shouldClear) return;
 
     try {
@@ -843,6 +847,14 @@ function applyPreservedSettings(workflow, settings) {
     }
   }
 
+  // Create combined fallback lists of positive and negative prompts
+  // so that if we load settings from a CLIPTextEncode PNG into a Qwen workflow,
+  // or vice versa, the prompts still transfer successfully.
+  const effectiveClipPositive = settings.clipPositive.length > 0 ? settings.clipPositive : settings.qwenPositive;
+  const effectiveClipNegative = settings.clipNegative.length > 0 ? settings.clipNegative : settings.qwenNegative;
+  const effectiveQwenPositive = settings.qwenPositive.length > 0 ? settings.qwenPositive : settings.clipPositive;
+  const effectiveQwenNegative = settings.qwenNegative.length > 0 ? settings.qwenNegative : settings.clipNegative;
+
   // Count prompt slots encountered in the new workflow so we can map them index-by-index
   let clipPositiveIdx = 0;
   let clipNegativeIdx = 0;
@@ -872,13 +884,13 @@ function applyPreservedSettings(workflow, settings) {
       }
 
       if (isNegative) {
-        if (clipNegativeIdx < settings.clipNegative.length) {
-          node.inputs.text = settings.clipNegative[clipNegativeIdx];
+        if (clipNegativeIdx < effectiveClipNegative.length) {
+          node.inputs.text = effectiveClipNegative[clipNegativeIdx];
         }
         clipNegativeIdx++;
       } else {
-        if (clipPositiveIdx < settings.clipPositive.length) {
-          node.inputs.text = settings.clipPositive[clipPositiveIdx];
+        if (clipPositiveIdx < effectiveClipPositive.length) {
+          node.inputs.text = effectiveClipPositive[clipPositiveIdx];
         }
         clipPositiveIdx++;
       }
@@ -901,13 +913,13 @@ function applyPreservedSettings(workflow, settings) {
       }
 
       if (isNegative) {
-        if (qwenNegativeIdx < settings.qwenNegative.length) {
-          node.inputs.prompt = settings.qwenNegative[qwenNegativeIdx];
+        if (qwenNegativeIdx < effectiveQwenNegative.length) {
+          node.inputs.prompt = effectiveQwenNegative[qwenNegativeIdx];
         }
         qwenNegativeIdx++;
       } else {
-        if (qwenPositiveIdx < settings.qwenPositive.length) {
-          node.inputs.prompt = settings.qwenPositive[qwenPositiveIdx];
+        if (qwenPositiveIdx < effectiveQwenPositive.length) {
+          node.inputs.prompt = effectiveQwenPositive[qwenPositiveIdx];
         }
         qwenPositiveIdx++;
       }
@@ -2175,15 +2187,39 @@ function createImageInputSlotElement(slotState, workflow) {
   // --- Select image button handler ---
   selectBtn.addEventListener('click', async () => {
     try {
-      // 1. Get path for this specific slot, or fall back to global last folder
-      const slotPath = localStorage.getItem(`last_image_path_slot_${slotIndex}`) || '';
+      // 1. Determine the best default directory for the file dialog.
+      //    Priority: injected PNG metadata path > per-slot localStorage > global last folder.
       let defaultPath = '';
-      if (slotPath) {
-        const lastIndex = Math.max(slotPath.lastIndexOf('/'), slotPath.lastIndexOf('\\'));
-        if (lastIndex !== -1) {
-          defaultPath = slotPath.substring(0, lastIndex);
+
+      // 1a. Try to recover the original source path from the PNG metadata that was
+      //     injected during upload (key: 'source_absolute_path').
+      if (slotState.imageFilename && window.api.extractPngSourcePath) {
+        try {
+          const metaResult = await window.api.extractPngSourcePath({
+            filename: slotState.imageFilename,
+            comfyUrl: comfyuiUrl
+          });
+          if (metaResult && metaResult.ok && metaResult.sourcePath) {
+            const sep = Math.max(metaResult.sourcePath.lastIndexOf('/'), metaResult.sourcePath.lastIndexOf('\\'));
+            if (sep !== -1) {
+              defaultPath = metaResult.sourcePath.substring(0, sep);
+            }
+          }
+        } catch (_) { /* silently ignore — fall through to localStorage */ }
+      }
+
+      // 1b. Fallback: per-slot localStorage path
+      if (!defaultPath) {
+        const slotPath = localStorage.getItem(`last_image_path_slot_${slotIndex}`) || '';
+        if (slotPath) {
+          const lastIndex = Math.max(slotPath.lastIndexOf('/'), slotPath.lastIndexOf('\\'));
+          if (lastIndex !== -1) {
+            defaultPath = slotPath.substring(0, lastIndex);
+          }
         }
       }
+
+      // 1c. Final fallback: global last folder
       if (!defaultPath) {
         defaultPath = localStorage.getItem('last_image_folder') || '';
       }
@@ -3425,7 +3461,28 @@ function collectImageMetadata(promptId) {
     // If user provided a web-UI workflow, inject current params and embed as 'workflow'
     ...(webUiWorkflow
       ? { workflow: JSON.stringify(injectParamsIntoWebUiWorkflow(webUiWorkflow, promptId)) }
-      : {})
+      : {}),
+    // Snapshot the current output settings so they can be restored on import
+    output_settings: (() => {
+      const prefixEl   = document.getElementById('autosave-prefix');
+      const delimEl    = document.getElementById('autosave-delimiter');
+      const paddingEl  = document.getElementById('autosave-padding');
+      const sourceEl   = document.getElementById('autosave-original-source');
+      const insertEl   = document.getElementById('autosave-insert-original');
+      const clearEl    = document.getElementById('autosave-clear-history');
+
+      const autosaveSnap = state ? state.autosaveSettings : null;
+      const snap = {
+        outputFolderPath:  (state && state.outputFolderPath !== undefined) ? state.outputFolderPath : (outputFolderPath || ''),
+        prefix:            autosaveSnap ? autosaveSnap.prefix : (prefixEl ? prefixEl.value.trim() : (localStorage.getItem('autosave_prefix') ?? 'autosave')),
+        delimiter:         autosaveSnap ? autosaveSnap.delimiter : (delimEl ? delimEl.value : (localStorage.getItem('autosave_delimiter') ?? '_')),
+        padding:           autosaveSnap ? autosaveSnap.padding : (paddingEl ? paddingEl.value : (localStorage.getItem('autosave_padding') ?? '4')),
+        source:            autosaveSnap ? autosaveSnap.source : (sourceEl ? sourceEl.value : (localStorage.getItem('autosave_original_source') ?? 'slot1')),
+        insertOriginal:    autosaveSnap ? String(autosaveSnap.insertOriginal) : (insertEl ? String(insertEl.checked) : (localStorage.getItem('autosave_insert_original') ?? 'true')),
+        clearHistory:      autosaveSnap ? String(autosaveSnap.clearHistory) : (clearEl ? String(clearEl.checked) : (localStorage.getItem('autosave_clear_history') ?? 'false')),
+      };
+      return JSON.stringify(snap);
+    })()
   };
 }
 
@@ -3455,6 +3512,26 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
     shouldAutoSave = true;
   }
   console.log(`[displayGeneratedImage] file=${filename} promptId=${promptId} savedForPromptId=${savedForPromptId} effectiveOutputFolderPath=${!!effectiveOutputFolderPath} shouldAutoSave=${shouldAutoSave}`);
+
+  // Inject metadata into ComfyUI's own output PNG file if we have ComfyUI Output Dir configured
+  if (type === 'output' && comfyOutputDir && filename.toLowerCase().endsWith('.png')) {
+    const sep = comfyOutputDir.endsWith('\\') || comfyOutputDir.endsWith('/') ? '' : '\\';
+    const subPart = subfolder ? subfolder + '\\' : '';
+    const localPath = comfyOutputDir + sep + subPart + filename;
+    const pngMetadata = collectImageMetadata(promptId);
+    window.api.injectMetadataToFile({
+      filePath: localPath,
+      metadata: pngMetadata
+    }).then(res => {
+      if (res && res.ok) {
+        console.log(`[Metadata Injection] Successfully injected metadata to ComfyUI output file: ${localPath}`);
+      } else {
+        console.warn(`[Metadata Injection] Failed or skipped: ${res?.error}`);
+      }
+    }).catch(err => {
+      console.error('[Metadata Injection] Error:', err);
+    });
+  }
 
   const rand = Math.random();
   // Build the canonical ComfyUI image URL
@@ -3533,7 +3610,7 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
     const prefix = autosaveSnap ? autosaveSnap.prefix : (prefixInput ? prefixInput.value.trim() : 'autosave');
     const insertOriginal = autosaveSnap ? autosaveSnap.insertOriginal : (insertOriginalCheckbox ? insertOriginalCheckbox.checked : true);
     const padding = autosaveSnap ? autosaveSnap.padding : (paddingInput ? parseInt(paddingInput.value, 10) : 4);
-    let startingNo = autosaveSnap ? autosaveSnap.startingNo : (startingNoInput ? parseInt(startingNoInput.value, 10) : 1);
+    let startingNo = startingNoInput ? parseInt(startingNoInput.value, 10) : (localStorage.getItem('autosave_starting_no') ? parseInt(localStorage.getItem('autosave_starting_no'), 10) : 1);
     if (isNaN(startingNo) || startingNo < 0) startingNo = 1;
     let source = autosaveSnap ? autosaveSnap.source : (sourceSelect ? sourceSelect.value : 'slot1');
     if (source === 'default') source = 'slot1';
@@ -4017,7 +4094,8 @@ function initGeneration() {
             padding: paddingEl ? (isNaN(parseInt(paddingEl.value, 10)) ? 4 : parseInt(paddingEl.value, 10)) : 4,
             startingNo: startingNoEl ? (isNaN(parseInt(startingNoEl.value, 10)) ? 1 : parseInt(startingNoEl.value, 10)) : 1,
             source: sourceEl ? sourceEl.value : 'slot1',
-            delimiter: delimEl ? delimEl.value : '_'
+            delimiter: delimEl ? delimEl.value : '_',
+            clearHistory: document.getElementById('autosave-clear-history')?.checked ?? false
           };
           
           promptJobStates.set(result.prompt_id, {
@@ -4111,6 +4189,44 @@ function initGeneration() {
 }
 
 // 7. Output Settings Folder Management
+
+// Reads all output-setting values from localStorage and pushes them into the
+// corresponding DOM elements. Safe to call at any time (init or after import).
+function syncOutputSettingsUI() {
+  const savedPath = localStorage.getItem('output_folder_path') || '';
+  outputFolderPath = savedPath;
+  updateOutputFolderUI();
+
+  const prefixInput   = document.getElementById('autosave-prefix');
+  const delimInput    = document.getElementById('autosave-delimiter');
+  const paddingInput  = document.getElementById('autosave-padding');
+  const startingNoInput = document.getElementById('autosave-starting-no');
+  const sourceSelect  = document.getElementById('autosave-original-source');
+  const sourceContainer = document.getElementById('autosave-source-container');
+  const insertOriginalCheckbox = document.getElementById('autosave-insert-original');
+  const clearHistoryCheckbox   = document.getElementById('autosave-clear-history');
+
+  if (prefixInput)   prefixInput.value   = localStorage.getItem('autosave_prefix')     ?? 'autosave';
+  if (delimInput)    delimInput.value    = localStorage.getItem('autosave_delimiter')   ?? '_';
+  if (paddingInput)  paddingInput.value  = localStorage.getItem('autosave_padding')    ?? '4';
+  if (startingNoInput) startingNoInput.value = localStorage.getItem('autosave_starting_no') ?? '1';
+  if (sourceSelect) {
+    let src = localStorage.getItem('autosave_original_source');
+    if (src === 'default') src = 'slot1';
+    sourceSelect.value = src ?? 'slot1';
+  }
+  if (insertOriginalCheckbox) {
+    insertOriginalCheckbox.checked = localStorage.getItem('autosave_insert_original') !== 'false';
+  }
+  if (clearHistoryCheckbox) {
+    clearHistoryCheckbox.checked = localStorage.getItem('autosave_clear_history') === 'true';
+  }
+  // Sync source-container visibility
+  if (sourceContainer && insertOriginalCheckbox) {
+    sourceContainer.style.display = insertOriginalCheckbox.checked ? 'flex' : 'none';
+  }
+}
+
 function initOutputSettings() {
   const btnSelect = document.getElementById('btn-select-output-folder');
   const btnClear = document.getElementById('btn-clear-output-folder');
@@ -4124,37 +4240,8 @@ function initOutputSettings() {
   const sourceContainer = document.getElementById('autosave-source-container');
   const delimInput = document.getElementById('autosave-delimiter');
 
-  // Load saved output path
-  const savedPath = localStorage.getItem('output_folder_path');
-  if (savedPath) {
-    outputFolderPath = savedPath;
-    updateOutputFolderUI();
-  }
-
-  // Load saved naming configuration
-  if (prefixInput) {
-    prefixInput.value = localStorage.getItem('autosave_prefix') ?? 'autosave';
-  }
-  if (delimInput) {
-    delimInput.value = localStorage.getItem('autosave_delimiter') ?? '_';
-  }
-  if (insertOriginalCheckbox) {
-    insertOriginalCheckbox.checked = localStorage.getItem('autosave_insert_original') !== 'false';
-  }
-  if (clearHistoryCheckbox) {
-    clearHistoryCheckbox.checked = localStorage.getItem('autosave_clear_history') === 'true';
-  }
-  if (paddingInput) {
-    paddingInput.value = localStorage.getItem('autosave_padding') ?? '4';
-  }
-  if (startingNoInput) {
-    startingNoInput.value = localStorage.getItem('autosave_starting_no') ?? '1';
-  }
-  if (sourceSelect) {
-    let savedSource = localStorage.getItem('autosave_original_source');
-    if (savedSource === 'default') savedSource = 'slot1';
-    sourceSelect.value = savedSource ?? 'slot1';
-  }
+  // Load saved values into the UI
+  syncOutputSettingsUI();
 
   // Helper function to toggle source select visibility
   function updateSourceVisibility() {
@@ -5129,14 +5216,48 @@ function renderJobsList() {
           statusClass = 'job-status-interrupted';
           statusLabel = 'Stopped';
         }
-        
+
+        // Build status cell — pending jobs get a cancel (✕) button
+        const statusTd = document.createElement('td');
+        statusTd.className = 'job-status-cell';
+        const badge = document.createElement('span');
+        badge.className = `job-status-badge ${statusClass}`;
+        badge.textContent = statusLabel;
+
+        if (job.status === 'pending' && job.promptId) {
+          const cancelBtn = document.createElement('button');
+          cancelBtn.className = 'job-cancel-btn';
+          cancelBtn.title = 'Remove from queue';
+          cancelBtn.textContent = '✕';
+          cancelBtn.addEventListener('click', async () => {
+            cancelBtn.disabled = true;
+            try {
+              // Ask ComfyUI to drop this prompt from its queue
+              await comfyFetch('/queue', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ delete: [job.promptId] })
+              });
+            } catch (_) { /* best-effort */ }
+            job.status = 'interrupted';
+            renderJobsList();
+          });
+          statusTd.appendChild(cancelBtn);
+        } else {
+          // Placeholder keeps the badge horizontally aligned with rows that have a cancel button
+          const placeholder = document.createElement('span');
+          placeholder.className = 'job-cancel-placeholder';
+          statusTd.appendChild(placeholder);
+        }
+        statusTd.appendChild(badge);
+
         tr.innerHTML = `
           <td class="job-filename-cell" title="${job.filename}">${job.filename}</td>
           <td>${job.aspectRatio}</td>
           <td>${job.linkedToFF ? 'Yes' : 'No'}</td>
           <td>${job.faceSelectorOrder}</td>
-          <td><span class="job-status-badge ${statusClass}">${statusLabel}</span></td>
         `;
+        tr.appendChild(statusTd);
         tbody.appendChild(tr);
       });
     }
@@ -5172,12 +5293,40 @@ function renderJobsList() {
           statusLabel = 'Stopped';
         }
 
+        // Build status cell — pending FF jobs get a cancel (✕) button
+        const statusTd = document.createElement('td');
+        statusTd.className = 'job-status-cell';
+        const badge = document.createElement('span');
+        badge.className = `job-status-badge ${statusClass}`;
+        badge.textContent = statusLabel;
+
+        if (job.status === 'pending' && job.id) {
+          const cancelBtn = document.createElement('button');
+          cancelBtn.className = 'job-cancel-btn';
+          cancelBtn.title = 'Remove from queue';
+          cancelBtn.textContent = '✕';
+          cancelBtn.addEventListener('click', () => {
+            // Remove from the in-memory facefusion queue
+            const idx = facefusionQueue.findIndex(q => q.jobId === job.id);
+            if (idx !== -1) facefusionQueue.splice(idx, 1);
+            job.status = 'interrupted';
+            renderJobsList();
+          });
+          statusTd.appendChild(cancelBtn);
+        } else {
+          // Placeholder keeps the badge horizontally aligned with rows that have a cancel button
+          const placeholder = document.createElement('span');
+          placeholder.className = 'job-cancel-placeholder';
+          statusTd.appendChild(placeholder);
+        }
+        statusTd.appendChild(badge);
+
         tr.innerHTML = `
           <td class="job-filename-cell" title="${job.outputFilename}">${job.outputFilename}</td>
           <td class="job-filename-cell" title="${job.sourceFilename}">${job.sourceFilename}</td>
           <td>${job.selectorOrder}</td>
-          <td><span class="job-status-badge ${statusClass}">${statusLabel}</span></td>
         `;
+        tr.appendChild(statusTd);
         ffTbody.appendChild(tr);
       });
     }
@@ -6341,24 +6490,64 @@ function initImportPrompt() {
           localStorage.setItem('comfyui_last_import_prompt_path', result.filePath);
         }
 
+        console.log('[Import] result.type:', result.type);
+        console.log('[Import] result.outputSettings:', result.outputSettings);
+
         const settings = extractSettingsFromImportedJson(result.content);
         
         const hasPrompts = settings.clipPositive.length > 0 || settings.clipNegative.length > 0 ||
                            settings.qwenPositive.length > 0 || settings.qwenNegative.length > 0;
         const hasImages = settings.imageSlots.length > 0;
+        const hasOutputSettings = !!(result.outputSettings && typeof result.outputSettings === 'object');
+
+        console.log('[Import] hasPrompts:', hasPrompts, 'hasImages:', hasImages, 'hasOutputSettings:', hasOutputSettings);
         
-        if (!hasPrompts && !hasImages) {
+        // Only bail out if there is truly nothing useful: no prompts, no images, AND no output settings
+        if (!hasPrompts && !hasImages && !hasOutputSettings) {
           alert('This file does not contain the required data to be extracted.');
           return;
         }
 
-        applyPreservedSettings(currentWorkflow, settings);
-        
-        localStorage.setItem('comfyui_workflow_json', JSON.stringify(currentWorkflow));
-        
-        generateDynamicParamsUI(currentWorkflow);
-        
-        showToast('Import Success', 'Prompts and image settings imported successfully.', 'success');
+        if (hasPrompts || hasImages) {
+          applyPreservedSettings(currentWorkflow, settings);
+          localStorage.setItem('comfyui_workflow_json', JSON.stringify(currentWorkflow));
+          generateDynamicParamsUI(currentWorkflow);
+        }
+
+        // Restore output settings that were embedded in the PNG at save time
+        if (hasOutputSettings) {
+          const os = result.outputSettings;
+          console.log('[Import] Applying output settings:', JSON.stringify(os));
+
+          // Write all restored values to localStorage first
+          if (os.outputFolderPath !== undefined) {
+            outputFolderPath = os.outputFolderPath || '';
+            if (outputFolderPath) {
+              localStorage.setItem('output_folder_path', outputFolderPath);
+            } else {
+              localStorage.removeItem('output_folder_path');
+            }
+            console.log('[Import] outputFolderPath set to:', outputFolderPath);
+          }
+          if (os.prefix     !== undefined) { localStorage.setItem('autosave_prefix',           String(os.prefix));           console.log('[Import] prefix:', os.prefix); }
+          if (os.delimiter  !== undefined) { localStorage.setItem('autosave_delimiter',         String(os.delimiter));         console.log('[Import] delimiter:', os.delimiter); }
+          if (os.padding    !== undefined) { localStorage.setItem('autosave_padding',            String(os.padding));           console.log('[Import] padding:', os.padding); }
+          if (os.source     !== undefined) { localStorage.setItem('autosave_original_source',   os.source === 'default' ? 'slot1' : String(os.source)); console.log('[Import] source:', os.source); }
+          if (os.insertOriginal !== undefined) { localStorage.setItem('autosave_insert_original', String(os.insertOriginal === 'true' || os.insertOriginal === true)); console.log('[Import] insertOriginal:', os.insertOriginal); }
+          if (os.clearHistory  !== undefined) { localStorage.setItem('autosave_clear_history',   String(os.clearHistory  === 'true' || os.clearHistory  === true)); console.log('[Import] clearHistory:', os.clearHistory); }
+
+          // Now push all values from localStorage into the DOM at once
+          syncOutputSettingsUI();
+          if (window.updateAutosavePreview) window.updateAutosavePreview();
+
+          showToast('Import Success', 'Prompts, image settings and output configuration restored successfully!', 'success');
+        } else {
+          console.log('[Import] No embedded output settings found in the imported file.');
+          // No embedded output settings — still resync UI to be safe
+          syncOutputSettingsUI();
+          if (window.updateAutosavePreview) window.updateAutosavePreview();
+          showToast('Import Success', 'Prompts & image settings imported. (No output settings found in this file)', 'warning');
+        }
       } catch (err) {
         console.error('Import error:', err);
         alert('This file does not contain the required data to be extracted.');

@@ -53,6 +53,9 @@ contextBridge.exposeInMainWorld('api', {
   },
   selectSaveWorkflowFile: (defaultPath) => ipcRenderer.invoke('select-save-workflow-file', defaultPath),
   combineWorkflows: (options) => ipcRenderer.invoke('combine-workflows', options),
-  updateMinimizeToTray: (enabled) => ipcRenderer.send('update-minimize-to-tray', enabled)
+  updateMinimizeToTray: (enabled) => ipcRenderer.send('update-minimize-to-tray', enabled),
+  // Extract injected source path from a ComfyUI-hosted input PNG's metadata
+  extractPngSourcePath: (options) => ipcRenderer.invoke('extract-png-source-path', options),
+  injectMetadataToFile: (options) => ipcRenderer.invoke('inject-metadata-to-file', options)
 });
 

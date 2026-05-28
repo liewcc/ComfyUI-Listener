@@ -487,9 +487,12 @@ ipcMain.handle('select-conda-exe', async (event, defaultPath) => {
 });
 
 // Upload image to ComfyUI via HTTP API /upload/image
+// For PNG files, injects the original absolute path as an iTXt metadata chunk
+// (key: 'source_absolute_path') before uploading so the app can later recover
+// the source location even when the workflow only stores the filename.
 ipcMain.handle('upload-image-to-comfyui', async (event, { filePath, comfyUrl }) => {
   try {
-    const fileBuffer = fs.readFileSync(filePath);
+    let fileBuffer = fs.readFileSync(filePath);
     const fileName = path.basename(filePath);
     const ext = path.extname(filePath).toLowerCase();
     let mimeType = 'application/octet-stream';
@@ -498,6 +501,11 @@ ipcMain.handle('upload-image-to-comfyui', async (event, { filePath, comfyUrl }) 
     else if (ext === '.webp') mimeType = 'image/webp';
     else if (ext === '.gif') mimeType = 'image/gif';
     else if (ext === '.bmp') mimeType = 'image/bmp';
+
+    // Inject source path into PNG metadata so the app can recover it later
+    if (ext === '.png') {
+      fileBuffer = injectPngMetadata(fileBuffer, { source_absolute_path: filePath });
+    }
 
     const blob = new Blob([fileBuffer], { type: mimeType });
     const formData = new FormData();
@@ -516,6 +524,46 @@ ipcMain.handle('upload-image-to-comfyui', async (event, { filePath, comfyUrl }) 
 
     const data = await response.json();
     return { ok: true, name: data.name };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+});
+
+// Extract the 'source_absolute_path' iTXt chunk that was injected during upload.
+// Fetches the image from ComfyUI (/view?filename=...&type=input) and reads its metadata.
+// Returns { ok: true, sourcePath: '<absolute path>' } or { ok: false }.
+ipcMain.handle('extract-png-source-path', async (event, { filename, comfyUrl }) => {
+  try {
+    if (!filename || !comfyUrl) return { ok: false };
+    const ext = path.extname(filename).toLowerCase();
+    if (ext !== '.png') return { ok: false }; // only PNG carries iTXt
+
+    const url = `${comfyUrl}/view?filename=${encodeURIComponent(filename)}&type=input`;
+    const response = await fetch(url);
+    if (!response.ok) return { ok: false };
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const chunks = extractPngTextChunks(buffer);
+    const sourcePath = chunks['source_absolute_path'] || null;
+    if (sourcePath) {
+      return { ok: true, sourcePath };
+    }
+    return { ok: false };
+  } catch (_) {
+    return { ok: false };
+  }
+});
+
+// Inject metadata directly into a local file in place
+ipcMain.handle('inject-metadata-to-file', async (event, { filePath, metadata }) => {
+  try {
+    if (!fs.existsSync(filePath)) {
+      return { ok: false, error: `File does not exist: ${filePath}` };
+    }
+    let fileBuffer = fs.readFileSync(filePath);
+    fileBuffer = injectPngMetadata(fileBuffer, metadata);
+    fs.writeFileSync(filePath, fileBuffer);
+    return { ok: true };
   } catch (error) {
     return { ok: false, error: error.message };
   }
@@ -930,12 +978,17 @@ ipcMain.handle('import-prompt-file', async (event, defaultPath) => {
     } else if (ext === '.png') {
       const fileBuffer = fs.readFileSync(filePath);
       const textChunks = extractPngTextChunks(fileBuffer);
+      // Also extract our injected output settings, if present
+      let outputSettings = null;
+      if (textChunks && textChunks.output_settings) {
+        try { outputSettings = JSON.parse(textChunks.output_settings); } catch (_) {}
+      }
       if (textChunks && textChunks.prompt) {
         const parsed = JSON.parse(textChunks.prompt);
-        return { ok: true, type: 'png_prompt', content: parsed, filePath: filePath };
+        return { ok: true, type: 'png_prompt', content: parsed, filePath: filePath, outputSettings };
       } else if (textChunks && textChunks.workflow) {
         const parsed = JSON.parse(textChunks.workflow);
-        return { ok: true, type: 'png_workflow', content: parsed, filePath: filePath };
+        return { ok: true, type: 'png_workflow', content: parsed, filePath: filePath, outputSettings };
       } else {
         return { ok: false, error: 'No workflow metadata found in this PNG file.' };
       }
