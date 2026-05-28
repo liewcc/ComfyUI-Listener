@@ -2668,10 +2668,16 @@ function handleBinaryMessage(arrayBuffer) {
 
     const imgEl = document.getElementById('result-img');
     imgEl.src = objectUrl;
+    if (activePromptId) {
+      imgEl.dataset.promptId = activePromptId;
+    } else {
+      delete imgEl.dataset.promptId;
+    }
 
     if (isCompareMode) {
       const imgBottom = document.getElementById('compare-img-bottom');
       if (imgBottom) imgBottom.src = objectUrl;
+      refreshCompareTopImage(activePromptId);
     }
     updateCompareButtonState();
 
@@ -3000,10 +3006,16 @@ function handleWebSocketMessage(data) {
 
         const imgEl = document.getElementById('result-img');
         imgEl.src = previewDataUrl;
+        if (activePromptId) {
+          imgEl.dataset.promptId = activePromptId;
+        } else {
+          delete imgEl.dataset.promptId;
+        }
 
         if (isCompareMode) {
           const imgBottom = document.getElementById('compare-img-bottom');
           if (imgBottom) imgBottom.src = previewDataUrl;
+          refreshCompareTopImage(activePromptId);
         }
         updateCompareButtonState();
 
@@ -3546,12 +3558,22 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
   document.getElementById('display-loading').classList.add('hidden');
   document.getElementById('display-image-container').classList.remove('hidden');
 
+  const resultImg = document.getElementById('result-img');
+  if (resultImg) {
+    if (promptId) {
+      resultImg.dataset.promptId = promptId;
+    } else {
+      delete resultImg.dataset.promptId;
+    }
+  }
+
   // Fetch image through main process to get a safe base64 data URL
-  await loadImageToElement(document.getElementById('result-img'), imageUrl);
+  await loadImageToElement(resultImg, imageUrl);
 
   if (isCompareMode) {
     const imgBottom = document.getElementById('compare-img-bottom');
-    if (imgBottom) imgBottom.src = document.getElementById('result-img').src;
+    if (imgBottom) imgBottom.src = resultImg.src;
+    await refreshCompareTopImage(promptId);
   }
   updateCompareButtonState();
 
@@ -4147,7 +4169,8 @@ function initGeneration() {
             filename: initialFilename,
             aspectRatio: getAspectRatioForPrompt(capturedParamValues),
             linkedToFF: isLinked,
-            faceSelectorOrder: isLinked && ffSettings ? ffSettings.faceSelectorOrder : '-'
+            faceSelectorOrder: isLinked && ffSettings ? ffSettings.faceSelectorOrder : '-',
+            imageSlots: capturedImageSlots
           });
           refreshJobsListIfVisible();
 
@@ -4957,6 +4980,37 @@ function initConnectionModal() {
   }
 }
 
+// Helper to reload the compare top image based on the job's snapshotted slots
+async function refreshCompareTopImage(promptId) {
+  const imgTop = document.getElementById('compare-img-top');
+  if (!imgTop) return;
+
+  let slot = null;
+  if (promptId) {
+    const job = jobHistoryList.find(j => j.promptId === promptId);
+    if (job && job.imageSlots) {
+      slot = job.imageSlots.find(s => s.slotIndex === selectedCompareSlot);
+    }
+  }
+  if (!slot) {
+    slot = imageSlots.find(s => s.slotIndex === selectedCompareSlot);
+  }
+
+  if (slot && slot.imageFilename) {
+    const inputUrl = `${comfyuiUrl}/view?filename=${encodeURIComponent(slot.imageFilename)}&type=input`;
+    
+    // Load input image and apply rotation and flip if needed
+    const ROTATION_DEGS = { none: 0, '90': 90, '180': 180, '270': 270 };
+    const rotationAngle = ROTATION_DEGS[slot.rotation] || 0;
+    const CSS_FLIP = { none: '', horizontal: 'scaleX(-1)', vertical: 'scaleY(-1)' };
+    const flipVal = CSS_FLIP[slot.flip] || '';
+    imgTop.style.transform = `rotate(${rotationAngle}deg) ${flipVal}`.trim();
+
+    // Fetch input image safely through Main Process proxy
+    await loadImageToElement(imgTop, inputUrl);
+  }
+}
+
 // 9. Image Comparison Slider Features
 function initCompareFeature() {
   const compareSourceSelect = document.getElementById('compare-source-select');
@@ -4981,10 +5035,26 @@ function initCompareFeature() {
         selectedCompareSlot = 0;
       }
 
-      // If we are currently in compare mode and switch to a slot that doesn't have an image, exit compare mode
-      const slot = imageSlots.find(s => s.slotIndex === selectedCompareSlot);
-      if (isCompareMode && (!slot || !slot.imageFilename)) {
-        toggleCompareMode(false);
+      // If we are currently in compare mode, check availability and refresh top image
+      if (isCompareMode) {
+        const resultImg = document.getElementById('result-img');
+        const promptId = resultImg ? resultImg.dataset.promptId : null;
+        let slot = null;
+        if (promptId) {
+          const job = jobHistoryList.find(j => j.promptId === promptId);
+          if (job && job.imageSlots) {
+            slot = job.imageSlots.find(s => s.slotIndex === selectedCompareSlot);
+          }
+        }
+        if (!slot) {
+          slot = imageSlots.find(s => s.slotIndex === selectedCompareSlot);
+        }
+
+        if (!slot || !slot.imageFilename) {
+          toggleCompareMode(false);
+        } else {
+          refreshCompareTopImage(promptId);
+        }
       }
       updateCompareButtonState();
     });
@@ -5058,7 +5128,17 @@ function updateCompareButtonState() {
     resultImg.src.startsWith('blob:')
   );
 
-  const slot = imageSlots.find(s => s.slotIndex === selectedCompareSlot);
+  let slot = null;
+  const promptId = resultImg ? resultImg.dataset.promptId : null;
+  if (promptId) {
+    const job = jobHistoryList.find(j => j.promptId === promptId);
+    if (job && job.imageSlots) {
+      slot = job.imageSlots.find(s => s.slotIndex === selectedCompareSlot);
+    }
+  }
+  if (!slot) {
+    slot = imageSlots.find(s => s.slotIndex === selectedCompareSlot);
+  }
   const hasInputImg = slot && slot.imageFilename;
 
   if (hasSrc && hasInputImg) {
@@ -5077,7 +5157,6 @@ async function toggleCompareMode(forceState = null) {
   const sliderContainer = document.getElementById('compare-slider-container');
   const btnCompare = document.getElementById('btn-compare');
   const imgBottom = document.getElementById('compare-img-bottom');
-  const imgTop = document.getElementById('compare-img-top');
   const imgTopWrapper = document.getElementById('compare-img-top-wrapper');
   const handle = document.getElementById('compare-handle');
 
@@ -5100,21 +5179,9 @@ async function toggleCompareMode(forceState = null) {
       imgBottom.src = resultImg.src;
     }
 
-    // Top image gets the selected input image
-    const slot = imageSlots.find(s => s.slotIndex === selectedCompareSlot);
-    if (slot && slot.imageFilename && imgTop) {
-      const inputUrl = `${comfyuiUrl}/view?filename=${encodeURIComponent(slot.imageFilename)}&type=input`;
-      
-      // Load input image and apply rotation and flip if needed
-      const ROTATION_DEGS = { none: 0, '90': 90, '180': 180, '270': 270 };
-      const rotationAngle = ROTATION_DEGS[slot.rotation] || 0;
-      const CSS_FLIP = { none: '', horizontal: 'scaleX(-1)', vertical: 'scaleY(-1)' };
-      const flipVal = CSS_FLIP[slot.flip] || '';
-      imgTop.style.transform = `rotate(${rotationAngle}deg) ${flipVal}`.trim();
-
-      // Fetch input image safely through Main Process proxy
-      await loadImageToElement(imgTop, inputUrl);
-    }
+    // Top image gets the snapshotted/current input image
+    const promptId = resultImg ? resultImg.dataset.promptId : null;
+    await refreshCompareTopImage(promptId);
 
     // Reset slider to middle position (50%)
     if (imgTopWrapper) {
