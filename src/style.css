@@ -610,13 +610,10 @@ body {
 
 /* KSampler Groups */
 .ksampler-group {
-  border-radius: 10px;
+  border-radius: var(--radius);
   padding: 14px 16px;
-  background: linear-gradient(135deg,
-    hsla(210, 60%, 14%, 0.6),
-    hsla(210, 40%, 11%, 0.3));
-  border: 1px solid hsla(210, 70%, 55%, 0.35);
-  border-left: 3px solid hsl(210, 80%, 55%);
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border);
   transition: var(--transition);
   margin-bottom: 12px;
   display: flex;
@@ -625,16 +622,15 @@ body {
 }
 
 .ksampler-group:focus-within {
-  border-color: hsla(210, 80%, 65%, 0.7);
-  box-shadow: 0 0 0 3px hsla(210, 80%, 65%, 0.1),
-              0 4px 20px hsla(210, 80%, 65%, 0.15);
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px var(--accent-glow);
 }
 
 .ksampler-group-title {
   font-family: var(--font-display);
   font-size: 13px;
   font-weight: 700;
-  color: hsl(210, 85%, 70%);
+  color: var(--text-main);
   padding-bottom: 8px;
   margin-bottom: 4px;
   display: flex;
@@ -660,19 +656,17 @@ body {
 
 /* Model Loader Panel Card */
 #loaders-panel {
-  border-left: 3px solid hsl(260, 80%, 55%);
   margin-bottom: 0;
   transition: var(--transition);
 }
 
 #loaders-panel:focus-within {
-  border-color: hsla(260, 80%, 65%, 0.7);
-  box-shadow: 0 0 0 3px hsla(260, 80%, 65%, 0.1),
-              0 4px 20px hsla(260, 80%, 65%, 0.15);
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px var(--accent-glow);
 }
 
 #loaders-panel .panel-header h3 {
-  color: hsl(260, 85%, 70%);
+  color: var(--text-main);
 }
 
 #loaders-panel .panel-title-icon {
@@ -681,19 +675,17 @@ body {
 
 /* Qwen Canvas Panel Card */
 #qwen-canvas-panel {
-  border-left: 3px solid hsl(35, 80%, 55%);
   margin-bottom: 0;
   transition: var(--transition);
 }
 
 #qwen-canvas-panel:focus-within {
-  border-color: hsla(35, 80%, 65%, 0.7);
-  box-shadow: 0 0 0 3px hsla(35, 80%, 65%, 0.1),
-              0 4px 20px hsla(35, 80%, 65%, 0.15);
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px var(--accent-glow);
 }
 
 #qwen-canvas-panel .panel-header h3 {
-  color: hsl(35, 85%, 70%);
+  color: var(--text-main);
 }
 
 #qwen-canvas-panel .panel-title-icon {
@@ -702,7 +694,6 @@ body {
 
 /* Scale Latent Panel Card */
 #scale-latent-panel {
-  border-left: 3px solid hsl(195, 85%, 50%);
   margin-bottom: 0;
   transition: var(--transition);
   flex-grow: 0;
@@ -710,13 +701,12 @@ body {
 }
 
 #scale-latent-panel:focus-within {
-  border-color: hsla(195, 85%, 60%, 0.7);
-  box-shadow: 0 0 0 3px hsla(195, 85%, 60%, 0.1),
-              0 4px 20px hsla(195, 85%, 60%, 0.15);
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px var(--accent-glow);
 }
 
 #scale-latent-panel .panel-header h3 {
-  color: hsl(195, 90%, 65%);
+  color: var(--text-main);
 }
 
 #scale-latent-panel .panel-title-icon {
@@ -725,19 +715,17 @@ body {
 
 /* General Settings Panel Card */
 #general-settings-panel {
-  border-left: 3px solid hsl(140, 80%, 50%);
   margin-bottom: 0;
   transition: var(--transition);
 }
 
 #general-settings-panel:focus-within {
-  border-color: hsla(140, 80%, 60%, 0.7);
-  box-shadow: 0 0 0 3px hsla(140, 80%, 60%, 0.1),
-              0 4px 20px hsla(140, 80%, 60%, 0.15);
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px var(--accent-glow);
 }
 
 #general-settings-panel .panel-header h3 {
-  color: hsl(140, 85%, 65%);
+  color: var(--text-main);
 }
 
 #general-settings-panel .panel-title-icon {
@@ -1568,41 +1556,35 @@ body {
    ══════════════════════════════════════════════════════════════ */
 
 .qwen-prompt-item {
-  border-radius: 10px;
+  border-radius: var(--radius);
   padding: 14px 16px 10px;
-  border: 1px solid transparent;
+  border: 1px solid var(--border);
   transition: var(--transition);
   margin-bottom: 4px;
 }
 
-/* Positive → purple-tinted left border + very subtle glow */
+/* Positive → purple-tinted, standard uniform border */
 .qwen-prompt-item.qwen-positive {
   background: linear-gradient(135deg,
     hsla(263, 60%, 14%, 0.6),
     hsla(263, 40%, 11%, 0.3));
-  border-color: hsla(263, 70%, 55%, 0.35);
-  border-left: 3px solid var(--accent);
 }
 
 .qwen-prompt-item.qwen-positive:focus-within {
-  border-color: hsla(263, 80%, 65%, 0.7);
-  box-shadow: 0 0 0 3px hsla(263, 80%, 65%, 0.1),
-              0 4px 20px hsla(263, 80%, 65%, 0.15);
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px var(--accent-glow);
 }
 
-/* Negative → red-tinted */
+/* Negative → red-tinted, standard uniform border */
 .qwen-prompt-item.qwen-negative {
   background: linear-gradient(135deg,
     hsla(350, 50%, 12%, 0.5),
     hsla(350, 30%, 10%, 0.3));
-  border-color: hsla(350, 70%, 50%, 0.3);
-  border-left: 3px solid var(--danger);
 }
 
 .qwen-prompt-item.qwen-negative:focus-within {
-  border-color: hsla(350, 80%, 55%, 0.6);
-  box-shadow: 0 0 0 3px hsla(350, 80%, 55%, 0.1),
-              0 4px 20px hsla(350, 80%, 55%, 0.12);
+  border-color: var(--danger);
+  box-shadow: 0 0 0 2px rgba(235, 53, 90, 0.25);
 }
 
 /* Header badges */

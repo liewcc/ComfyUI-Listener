@@ -5348,21 +5348,27 @@ function renderJobsList() {
         badge.className = `job-status-badge ${statusClass}`;
         badge.textContent = statusLabel;
 
-        if (job.status === 'pending' && job.promptId) {
+        if ((job.status === 'pending' || job.status === 'running') && job.promptId) {
           const cancelBtn = document.createElement('button');
           cancelBtn.className = 'job-cancel-btn';
-          cancelBtn.title = 'Remove from queue';
+          cancelBtn.title = job.status === 'running' ? 'Stop execution' : 'Remove from queue';
           cancelBtn.textContent = '✕';
           cancelBtn.addEventListener('click', async () => {
             cancelBtn.disabled = true;
-            try {
-              // Ask ComfyUI to drop this prompt from its queue
-              await comfyFetch('/queue', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ delete: [job.promptId] })
-              });
-            } catch (_) { /* best-effort */ }
+            if (job.status === 'running') {
+              try {
+                await interruptActiveGeneration();
+              } catch (_) { /* best-effort */ }
+            } else {
+              try {
+                // Ask ComfyUI to drop this prompt from its queue
+                await comfyFetch('/queue', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ delete: [job.promptId] })
+                });
+              } catch (_) { /* best-effort */ }
+            }
             job.status = 'interrupted';
             renderJobsList();
           });
@@ -5424,17 +5430,33 @@ function renderJobsList() {
         badge.className = `job-status-badge ${statusClass}`;
         badge.textContent = statusLabel;
 
-        if (job.status === 'pending' && job.id) {
+        if ((job.status === 'pending' || job.status === 'running') && job.id) {
           const cancelBtn = document.createElement('button');
           cancelBtn.className = 'job-cancel-btn';
-          cancelBtn.title = 'Remove from queue';
+          cancelBtn.title = job.status === 'running' ? 'Stop execution' : 'Remove from queue';
           cancelBtn.textContent = '✕';
-          cancelBtn.addEventListener('click', () => {
-            // Remove from the in-memory facefusion queue
-            const idx = facefusionQueue.findIndex(q => q.jobId === job.id);
-            if (idx !== -1) facefusionQueue.splice(idx, 1);
-            job.status = 'interrupted';
-            renderJobsList();
+          cancelBtn.addEventListener('click', async () => {
+            cancelBtn.disabled = true;
+            if (job.status === 'running') {
+              try {
+                job.status = 'interrupted';
+                renderJobsList();
+                const result = await window.api.stopFacefusion();
+                if (result.ok) {
+                  const statusText = document.getElementById('ff-status-text');
+                  if (statusText) statusText.textContent = 'Stopped';
+                  showToast('Task Stopped', 'Facefusion process terminated by user.', 'info');
+                }
+              } catch (err) {
+                showToast('Error stopping process', err.message, 'error');
+              }
+            } else {
+              // Remove from the in-memory facefusion queue
+              const idx = facefusionQueue.findIndex(q => q.jobId === job.id);
+              if (idx !== -1) facefusionQueue.splice(idx, 1);
+              job.status = 'interrupted';
+              renderJobsList();
+            }
           });
           statusTd.appendChild(cancelBtn);
         } else {
