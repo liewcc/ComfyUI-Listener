@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -144,7 +144,11 @@ function createTray() {
     {
       label: 'Show Window',
       click: () => {
-        if (mainWindow) mainWindow.show();
+        if (mainWindow) {
+          if (mainWindow.isMinimized()) mainWindow.restore();
+          mainWindow.show();
+          mainWindow.focus();
+        }
       }
     },
     { type: 'separator' },
@@ -157,13 +161,28 @@ function createTray() {
     }
   ]);
   tray.setToolTip('ComfyUI Listener Control Center');
-  tray.setContextMenu(contextMenu);
 
-  tray.on('double-click', () => {
-    if (mainWindow) {
-      mainWindow.show();
-    }
-  });
+  if (process.platform === 'win32') {
+    tray.on('click', () => {
+      if (mainWindow) {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+      }
+    });
+    tray.on('right-click', () => {
+      tray.popUpContextMenu(contextMenu);
+    });
+  } else {
+    tray.setContextMenu(contextMenu);
+    tray.on('double-click', () => {
+      if (mainWindow) {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+      }
+    });
+  }
 }
 
 function createWindow() {
@@ -172,6 +191,7 @@ function createWindow() {
     height: 850,
     minWidth: 900,
     minHeight: 600,
+    icon: path.join(__dirname, 'logo_all_size.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -210,17 +230,47 @@ function createWindow() {
   });
 }
 
-app.whenReady().then(() => {
-  createWindow();
-  createTray();
+// Set Application User Model ID for Windows toast notifications to route click events correctly
+app.setAppUserModelId('ComfyUI Listener');
 
-  app.on('activate', function () {
-    if (mainWindow === null) createWindow();
+const gotTheLock = app.requestSingleInstanceLock();
+
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (event, commandLine, workingDirectory) => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
   });
-});
+
+  app.whenReady().then(() => {
+    createWindow();
+    createTray();
+
+    app.on('activate', function () {
+      if (mainWindow === null) createWindow();
+    });
+  });
+}
 
 app.on('before-quit', () => {
   isQuitting = true;
+  if (activeFacefusionProcess) {
+    try {
+      const pid = activeFacefusionProcess.pid;
+      if (process.platform === 'win32') {
+        const { exec } = require('child_process');
+        exec(`taskkill /F /T /PID ${pid}`);
+      } else {
+        activeFacefusionProcess.kill('SIGKILL');
+      }
+    } catch (err) {
+      console.error('Failed to kill Facefusion process on exit:', err);
+    }
+  }
 });
 
 app.on('window-all-closed', function () {
@@ -229,6 +279,54 @@ app.on('window-all-closed', function () {
 
 ipcMain.on('update-minimize-to-tray', (event, enabled) => {
   minimizeToTray = enabled;
+});
+
+ipcMain.handle('set-hide-cli', (event, hide) => {
+  const fs = require('fs');
+  const flagPath = path.join(app.getAppPath(), 'hide_cli.flag');
+  if (hide) {
+    fs.writeFileSync(flagPath, 'true');
+  } else {
+    try {
+      if (fs.existsSync(flagPath)) {
+        fs.unlinkSync(flagPath);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  return true;
+});
+
+ipcMain.handle('get-hide-cli', () => {
+  const fs = require('fs');
+  const flagPath = path.join(app.getAppPath(), 'hide_cli.flag');
+  return fs.existsSync(flagPath);
+});
+
+ipcMain.handle('save-job-history', async (event, data) => {
+  try {
+    const filePath = path.join(app.getPath('userData'), 'job_history.json');
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+    return { ok: true };
+  } catch (err) {
+    console.error('Failed to save job history:', err);
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('load-job-history', async () => {
+  try {
+    const filePath = path.join(app.getPath('userData'), 'job_history.json');
+    if (fs.existsSync(filePath)) {
+      const fileContent = fs.readFileSync(filePath, 'utf8');
+      return JSON.parse(fileContent);
+    }
+    return null;
+  } catch (err) {
+    console.error('Failed to load job history:', err);
+    return null;
+  }
 });
 
 // Helper to find the matching sister workflow file (api <=> webui)
@@ -1087,6 +1185,45 @@ ipcMain.handle('stop-watching-folder', async () => {
   stopWatching();
   return { ok: true };
 });
+
+const activeNotifications = new Set();
+
+ipcMain.handle('show-image-notification', async (event, { filePath, filename, silent }) => {
+  try {
+    if (Notification.isSupported()) {
+      const notification = new Notification({
+        title: 'Image Completion',
+        body: `New image completed: ${filename}`,
+        silent: silent,
+        icon: path.join(__dirname, 'icon.png')
+      });
+      
+      activeNotifications.add(notification);
+      
+      notification.on('click', () => {
+        if (filePath) {
+          const resolvedPath = path.resolve(filePath);
+          if (fs.existsSync(resolvedPath)) {
+            shell.showItemInFolder(resolvedPath);
+          }
+        }
+        activeNotifications.delete(notification);
+      });
+      
+      notification.on('close', () => {
+        activeNotifications.delete(notification);
+      });
+      
+      notification.show();
+      return { ok: true };
+    } else {
+      return { ok: false, error: 'Notifications not supported' };
+    }
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 
 
 

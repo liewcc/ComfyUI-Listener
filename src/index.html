@@ -6,7 +6,7 @@
   <title>ComfyUI Listener Control Center</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:ital,wght@0,300;0,400;0,500;0,700;1,300;1,400;1,500;1,700&family=Roboto+Mono:ital,wght@0,300;0,400;0,500;0,700;1,300;1,400;1,500;1,700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -14,6 +14,13 @@
     
     <!-- Left Navigation Sidebar -->
     <aside class="sidebar">
+      <div class="logo-area">
+        <img src="img/logo.png" class="logo-icon" alt="Logo">
+        <div class="logo-text">
+          <h1>ComfyUI Listener</h1>
+          <span>Control Center</span>
+        </div>
+      </div>
       <nav class="nav-menu">
         <div class="nav-item active" data-tab="tab-generator">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
@@ -472,9 +479,21 @@
                   <input type="checkbox" id="minimize-to-tray" class="autosave-checkbox">
                   <label for="minimize-to-tray">Minimize to Tray on Close</label>
                 </div>
-                <div class="checkbox-row" style="margin-bottom: 0;">
+                <div class="checkbox-row" style="margin-bottom: 12px;">
+                  <input type="checkbox" id="toggle-hide-cli" class="autosave-checkbox">
+                  <label for="toggle-hide-cli">Hide Terminal CLI on Startup</label>
+                </div>
+                <div class="checkbox-row" style="margin-bottom: 12px;">
                   <input type="checkbox" id="autosave-clear-history" class="autosave-checkbox">
                   <label for="autosave-clear-history">Clear Job History on Save</label>
+                </div>
+                <div class="checkbox-row" style="margin-bottom: 12px;">
+                  <input type="checkbox" id="notify-image-completed" class="autosave-checkbox">
+                  <label for="notify-image-completed">Notification on Image Completion</label>
+                </div>
+                <div class="checkbox-row" style="margin-bottom: 0;">
+                  <input type="checkbox" id="notify-sound-enabled" class="autosave-checkbox">
+                  <label for="notify-sound-enabled">Play Sound on Notification</label>
                 </div>
               </div>
             </div>
@@ -743,7 +762,7 @@
                 <h3>Console Output Log</h3>
                 <button id="btn-clear-ff-console" class="btn btn-ghost btn-small" style="width: auto; padding: 2px 8px; font-size: 11px;">Clear Log</button>
               </div>
-              <div class="panel-body scrollable" style="background-color: #050811; padding: 12px; font-family: monospace; font-size: 12px; color: #a4b1cd; overflow-y: auto;">
+              <div class="panel-body scrollable" style="background-color: #050811; padding: 12px; font-family: var(--font-mono); font-size: 12px; color: #a4b1cd; overflow-y: auto;">
                 <pre id="ff-console-logs" style="margin: 0; white-space: pre-wrap; word-break: break-all;"></pre>
               </div>
             </div>

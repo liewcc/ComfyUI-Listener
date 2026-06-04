@@ -56,6 +56,11 @@ contextBridge.exposeInMainWorld('api', {
   updateMinimizeToTray: (enabled) => ipcRenderer.send('update-minimize-to-tray', enabled),
   // Extract injected source path from a ComfyUI-hosted input PNG's metadata
   extractPngSourcePath: (options) => ipcRenderer.invoke('extract-png-source-path', options),
-  injectMetadataToFile: (options) => ipcRenderer.invoke('inject-metadata-to-file', options)
+  injectMetadataToFile: (options) => ipcRenderer.invoke('inject-metadata-to-file', options),
+  showImageNotification: (options) => ipcRenderer.invoke('show-image-notification', options),
+  setHideCliFlag: (hide) => ipcRenderer.invoke('set-hide-cli', hide),
+  getHideCliFlag: () => ipcRenderer.invoke('get-hide-cli'),
+  saveJobHistory: (data) => ipcRenderer.invoke('save-job-history', data),
+  loadJobHistory: () => ipcRenderer.invoke('load-job-history')
 });
 

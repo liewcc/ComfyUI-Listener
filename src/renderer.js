@@ -235,6 +235,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // Initialize mini status indicators in Execution Monitor
   if (typeof updateComfyWorkingStatus === 'function') updateComfyWorkingStatus(false);
   if (typeof updateFFWorkingStatus === 'function') updateFFWorkingStatus(false);
+
+  // Load jobs from disk on startup
+  loadJobsFromDisk();
 });
 
 // Helper: Generate UUID for ComfyUI client identification
@@ -472,6 +475,8 @@ function setupWebSocket(wsUrl) {
     if (wsInstance !== myToken) return; // Stale handler — a newer connection replaced us
     updateConnectionStatus('connected', 'Connected');
     checkQueueStatus();
+    // Reconcile status of loaded jobs with the ComfyUI server
+    reconcileComfyJobs();
     // Refresh image previews that couldn't load before connection was ready (e.g. on app restart)
     refreshImagePreviews();
   };
@@ -2773,6 +2778,7 @@ function handleWebSocketMessage(data) {
         if (runningJob) {
           runningJob.status = 'running';
           refreshJobsListIfVisible();
+          saveJobsToDisk();
         }
         myQueuedPromptIds.delete(incomingId);
         pendingPromptId = false;
@@ -2827,6 +2833,7 @@ function handleWebSocketMessage(data) {
         if (completedJob) {
           completedJob.status = 'completed';
           refreshJobsListIfVisible();
+          saveJobsToDisk();
         }
         activePromptId = null;
         // Do NOT reset promptSavedPath and savedForPromptId here so that the "Open in Viewer" button continues to open the saved file path of the completed run
@@ -2962,6 +2969,7 @@ function handleWebSocketMessage(data) {
         if (interruptedJob) {
           interruptedJob.status = 'interrupted';
           refreshJobsListIfVisible();
+          saveJobsToDisk();
         }
         delete promptSamplerCountsMap[finishedPromptId];
         promptJobStates.delete(finishedPromptId);
@@ -2996,6 +3004,7 @@ function handleWebSocketMessage(data) {
         if (errorJob) {
           errorJob.status = 'failed';
           refreshJobsListIfVisible();
+          saveJobsToDisk();
         }
         delete promptSamplerCountsMap[activePromptId];
         promptJobStates.delete(activePromptId);
@@ -3784,6 +3793,9 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
         }
         openBtn.onclick = () => window.api.openPath({ path: result.savedPath });
         console.log(`[AutoSave] Saved: ${result.savedPath}`);
+        
+        // Trigger OS notification and sound if configured
+        triggerCompletionNotification(result.savedPath);
 
         // Mark image as saved for this prompt and check if we can clear job history
         if (promptId) {
@@ -4230,6 +4242,7 @@ function initGeneration() {
             imageSlots: capturedImageSlots
           });
           refreshJobsListIfVisible();
+          saveJobsToDisk();
 
           window.api.logDebug({ message: `Prompt added to myQueuedPromptIds: ${result.prompt_id}, samplerCount: ${newSamplerCount}` });
           console.log(`Prompt queued successfully! Prompt ID: ${result.prompt_id}`);
@@ -4588,6 +4601,7 @@ function checkAndProcessFacefusionQueue() {
   }
 
   const nextItem = facefusionQueue.shift();
+  saveJobsToDisk();
   let nextPath = '';
   if (nextItem && typeof nextItem === 'object') {
     nextPath = nextItem.savedPath;
@@ -4656,6 +4670,7 @@ function triggerAutoFaceFusion(savedPath, promptId) {
   showToast('Added to Queue', `Image added to Face Fusion queue (${facefusionQueue.length} pending)`, 'info');
   
   refreshJobsListIfVisible();
+  saveJobsToDisk();
   checkAndProcessFacefusionQueue();
 }
 
@@ -4975,6 +4990,88 @@ function initGeneralSettings() {
       if (window.api && typeof window.api.updateMinimizeToTray === 'function') {
         window.api.updateMinimizeToTray(enabled);
       }
+    });
+  }
+
+  // Load and initialize Hide Terminal CLI checkbox
+  const toggleHideCli = document.getElementById('toggle-hide-cli');
+  if (toggleHideCli && window.api && typeof window.api.getHideCliFlag === 'function') {
+    window.api.getHideCliFlag().then(hide => {
+      toggleHideCli.checked = hide;
+    });
+
+    toggleHideCli.addEventListener('change', (e) => {
+      if (typeof window.api.setHideCliFlag === 'function') {
+        window.api.setHideCliFlag(e.target.checked);
+      }
+    });
+  }
+
+  // Load and initialize notification checkboxes
+  const notifyOnCompleteCheckbox = document.getElementById('notify-image-completed');
+  const notifySoundCheckbox = document.getElementById('notify-sound-enabled');
+
+  if (notifyOnCompleteCheckbox) {
+    const savedNotify = localStorage.getItem('notify_image_completed') === 'true';
+    notifyOnCompleteCheckbox.checked = savedNotify;
+    notifyOnCompleteCheckbox.addEventListener('change', () => {
+      localStorage.setItem('notify_image_completed', notifyOnCompleteCheckbox.checked);
+    });
+  }
+
+  if (notifySoundCheckbox) {
+    const savedSound = localStorage.getItem('notify_sound_enabled') === 'true';
+    notifySoundCheckbox.checked = savedSound;
+    notifySoundCheckbox.addEventListener('change', () => {
+      localStorage.setItem('notify_sound_enabled', notifySoundCheckbox.checked);
+    });
+  }
+}
+
+function playNotificationSound() {
+  try {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const playTone = (freq, startTime, duration) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, startTime);
+      
+      gain.gain.setValueAtTime(0.15, startTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
+      
+      osc.start(startTime);
+      osc.stop(startTime + duration);
+    };
+    
+    const now = audioCtx.currentTime;
+    playTone(659.25, now, 0.3); // E5 chime
+    playTone(880.00, now + 0.15, 0.4); // A5 chime
+  } catch (e) {
+    console.error('Failed to play synthesized sound:', e);
+  }
+}
+
+function triggerCompletionNotification(filePath) {
+  const notifyEnabled = localStorage.getItem('notify_image_completed') === 'true';
+  const soundEnabled = localStorage.getItem('notify_sound_enabled') === 'true';
+  
+  if (!notifyEnabled) return;
+  
+  const filename = filePath.split(/[\\/]/).pop();
+  
+  if (soundEnabled) {
+    playNotificationSound();
+  }
+  
+  if (window.api && typeof window.api.showImageNotification === 'function') {
+    window.api.showImageNotification({
+      filePath: filePath,
+      filename: filename,
+      silent: true // set to true because sound is manually played via playNotificationSound in the renderer to ensure consistency
     });
   }
 }
@@ -5300,6 +5397,142 @@ let ffJobHistoryList = [];
 let currentFFJobId = null;
 let qwenCanvasNodeId = null;
 
+function saveJobsToDisk() {
+  if (window.api && typeof window.api.saveJobHistory === 'function') {
+    const data = {
+      jobHistoryList,
+      ffJobHistoryList,
+      facefusionQueue
+    };
+    window.api.saveJobHistory(data).catch(err => {
+      console.error('[History] Failed to auto-save job history:', err);
+    });
+  }
+}
+
+async function loadJobsFromDisk() {
+  if (!window.api || typeof window.api.loadJobHistory !== 'function') return;
+  try {
+    const data = await window.api.loadJobHistory();
+    if (data) {
+      if (Array.isArray(data.jobHistoryList)) {
+        jobHistoryList = data.jobHistoryList;
+        // Parse date strings back to Date objects
+        jobHistoryList.forEach(job => {
+          if (job.timestamp) job.timestamp = new Date(job.timestamp);
+        });
+      }
+      if (Array.isArray(data.ffJobHistoryList)) {
+        ffJobHistoryList = data.ffJobHistoryList;
+        // Parse date strings back to Date objects
+        ffJobHistoryList.forEach(job => {
+          if (job.timestamp) job.timestamp = new Date(job.timestamp);
+          if (job.status === 'running') {
+            // Facefusion processes are killed when the app shuts down
+            job.status = 'interrupted';
+          }
+        });
+      }
+      if (Array.isArray(data.facefusionQueue)) {
+        facefusionQueue = data.facefusionQueue;
+      }
+      
+      // Update the UI
+      refreshJobsListIfVisible();
+      
+      // Reconcile status of loaded jobs with the ComfyUI server if connection is already open
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        reconcileComfyJobs();
+      }
+
+      // Resume Facefusion queue if there are pending jobs and process is not running
+      if (facefusionQueue.length > 0 && !isFacefusionRunning) {
+        checkAndProcessFacefusionQueue();
+      }
+    }
+  } catch (err) {
+    console.error('[History] Failed to load job history on startup:', err);
+  }
+}
+
+async function reconcileComfyJobs() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
+    const response = await comfyFetch('/queue');
+    const data = await response.json();
+    
+    // ComfyUI queue runs arrays are formatted as [prompt_no, prompt_id, ...]
+    const runningIds = (data.queue_running || []).map(item => item[1]);
+    const pendingIds = (data.queue_pending || []).map(item => item[1]);
+    
+    let historyData = null;
+    try {
+      const historyResp = await comfyFetch('/history');
+      historyData = await historyResp.json();
+    } catch (_) {
+      // Best-effort check if history fails
+    }
+
+    let changed = false;
+    jobHistoryList.forEach(job => {
+      if (job.status === 'running' || job.status === 'pending') {
+        if (runningIds.includes(job.promptId)) {
+          if (job.status !== 'running') {
+            job.status = 'running';
+            changed = true;
+          }
+          const isNewlyDiscovered = (activePromptId === null);
+          activePromptId = job.promptId;
+          if (isNewlyDiscovered) {
+            startJobTimer();
+            const displayEmpty = document.getElementById('display-empty');
+            if (displayEmpty) displayEmpty.classList.add('hidden');
+            const displayLoading = document.getElementById('display-loading');
+            if (displayLoading) displayLoading.classList.remove('hidden');
+            const displayImageContainer = document.getElementById('display-image-container');
+            if (displayImageContainer) displayImageContainer.classList.add('hidden');
+            updateProgress(0, 0, 'Executing workflow...');
+          }
+        } else if (pendingIds.includes(job.promptId)) {
+          if (job.status !== 'pending') {
+            job.status = 'pending';
+            changed = true;
+          }
+          myQueuedPromptIds.add(job.promptId);
+        } else {
+          // If the job is not in the active queues, check history
+          if (historyData && historyData[job.promptId]) {
+            const entry = historyData[job.promptId];
+            const statusStr = entry.status && entry.status.status_str;
+            const newStatus = statusStr === 'success' ? 'completed' : 'failed';
+            if (job.status !== newStatus) {
+              job.status = newStatus;
+              changed = true;
+            }
+          } else {
+            // Not in queue, not in history -> interrupted/lost
+            if (job.status !== 'interrupted') {
+              job.status = 'interrupted';
+              changed = true;
+            }
+          }
+        }
+      }
+    });
+
+    if (changed) {
+      refreshJobsListIfVisible();
+      saveJobsToDisk();
+    }
+
+    if (typeof updateComfyWorkingStatus === 'function') {
+      updateComfyWorkingStatus(activePromptId !== null);
+    }
+  } catch (err) {
+    console.error('[History] Reconcile ComfyUI jobs status failed:', err);
+  }
+}
+
 function getAspectRatioForPrompt(capturedParamValues) {
   const mapping = paramMappings.find(m => m.key === 'aspect_ratio');
   if (!mapping) return 'N/A';
@@ -5371,6 +5604,7 @@ function renderJobsList() {
             }
             job.status = 'interrupted';
             renderJobsList();
+            saveJobsToDisk();
           });
           statusTd.appendChild(cancelBtn);
         } else {
@@ -5441,6 +5675,7 @@ function renderJobsList() {
               try {
                 job.status = 'interrupted';
                 renderJobsList();
+                saveJobsToDisk();
                 const result = await window.api.stopFacefusion();
                 if (result.ok) {
                   const statusText = document.getElementById('ff-status-text');
@@ -5456,6 +5691,7 @@ function renderJobsList() {
               if (idx !== -1) facefusionQueue.splice(idx, 1);
               job.status = 'interrupted';
               renderJobsList();
+              saveJobsToDisk();
             }
           });
           statusTd.appendChild(cancelBtn);
@@ -5513,6 +5749,7 @@ function initJobsModal() {
       
       // Re-render lists
       renderJobsList();
+      saveJobsToDisk();
       
       // Notify the user
       showToast('History Cleared', 'Completed and stopped/failed jobs have been cleared.', 'info');
@@ -5974,6 +6211,7 @@ function initFacefusionTab() {
         showToast('Added to Queue', `Manual run added to Face Fusion queue (${facefusionQueue.length} pending)`, 'info');
         
         refreshJobsListIfVisible();
+        saveJobsToDisk();
         return;
       }
 
@@ -6119,6 +6357,7 @@ function initFacefusionTab() {
           selectorOrder: selectorOrderVal
         });
         refreshJobsListIfVisible();
+        saveJobsToDisk();
       } else {
         // Queued job starts running now
         const job = ffJobHistoryList.find(j => j.id === jobId);
@@ -6126,6 +6365,7 @@ function initFacefusionTab() {
           job.status = 'running';
           job.outputFilename = 'Running...';
           refreshJobsListIfVisible();
+          saveJobsToDisk();
         }
       }
       currentFFJobId = jobId;
@@ -6233,6 +6473,7 @@ function initFacefusionTab() {
             job.status = 'failed';
           }
           refreshJobsListIfVisible();
+          saveJobsToDisk();
         }
 
         currentFFJobId = null;
@@ -6245,6 +6486,9 @@ function initFacefusionTab() {
           if (progressText) progressText.textContent = '100%';
           if (progressFill) progressFill.style.width = '100%';
           showToast('Success', `Task completed! Output saved to: ${outputFilename}`, 'success');
+          
+          // Trigger completion notification and sound if configured
+          triggerCompletionNotification(outPath);
 
           // Load preview
           if (outputEmpty) outputEmpty.classList.add('hidden');
@@ -6285,6 +6529,7 @@ function initFacefusionTab() {
         if (job && job.status !== 'interrupted') {
           job.status = 'failed';
           refreshJobsListIfVisible();
+          saveJobsToDisk();
         }
         
         currentFFJobId = null;
@@ -6302,6 +6547,7 @@ function initFacefusionTab() {
         if (job) {
           job.status = 'interrupted';
           refreshJobsListIfVisible();
+          saveJobsToDisk();
         }
         const result = await window.api.stopFacefusion();
         if (result.ok) {

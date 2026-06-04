@@ -27,6 +27,8 @@ node_modules/
 
 # Generated media & datasets
 *.png
+!src/img/logo.png
+!system_img/logo.png
 *.jpg
 *.jpeg
 *.webp
@@ -46,3 +48,6 @@ test_*
 test.*
 *.test.*
 scratch/
+
+# Runtime configurations
+hide_cli.flag
