@@ -3698,7 +3698,7 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
     const prefix = autosaveSnap ? autosaveSnap.prefix : (prefixInput ? prefixInput.value.trim() : 'autosave');
     const insertOriginal = autosaveSnap ? autosaveSnap.insertOriginal : (insertOriginalCheckbox ? insertOriginalCheckbox.checked : true);
     const padding = autosaveSnap ? autosaveSnap.padding : (paddingInput ? parseInt(paddingInput.value, 10) : 4);
-    let startingNo = startingNoInput ? parseInt(startingNoInput.value, 10) : (localStorage.getItem('autosave_starting_no') ? parseInt(localStorage.getItem('autosave_starting_no'), 10) : 1);
+    let startingNo = autosaveSnap ? autosaveSnap.startingNo : (startingNoInput ? parseInt(startingNoInput.value, 10) : (localStorage.getItem('autosave_starting_no') ? parseInt(localStorage.getItem('autosave_starting_no'), 10) : 1));
     if (isNaN(startingNo) || startingNo < 0) startingNo = 1;
     let source = autosaveSnap ? autosaveSnap.source : (sourceSelect ? sourceSelect.value : 'slot1');
     if (source === 'default') source = 'slot1';
@@ -3758,9 +3758,25 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
     }
 
     startingNo = currentNo;
-    if (startingNoInput) {
-      startingNoInput.value = startingNo;
-      localStorage.setItem('autosave_starting_no', startingNo);
+
+    let currentUIBasename = '';
+    if (insertOriginalCheckbox && insertOriginalCheckbox.checked) {
+      const currentSource = sourceSelect ? sourceSelect.value : 'slot1';
+      const slotIdx = parseInt(currentSource.replace('slot', ''), 10) - 1;
+      const currentSlot = imageSlots.find(s => s.slotIndex === slotIdx);
+      if (currentSlot && currentSlot.imageFilename) {
+        const fn = currentSlot.imageFilename;
+        currentUIBasename = fn.substring(0, fn.lastIndexOf('.')) || fn;
+      }
+    }
+
+    const shouldUpdateUI = !insertOriginal || (originalBasename === currentUIBasename);
+
+    if (shouldUpdateUI) {
+      if (startingNoInput) {
+        startingNoInput.value = startingNo;
+        localStorage.setItem('autosave_starting_no', startingNo);
+      }
     }
 
     const formattedNo = padding > 0 ? String(startingNo).padStart(padding, '0') : String(startingNo);
@@ -3805,11 +3821,13 @@ async function displayGeneratedImage(filename, subfolder, type, promptId) {
 
         // Auto increment Starting No.
         const nextStartingNo = startingNo + 1;
-        if (startingNoInput) {
-          startingNoInput.value = nextStartingNo;
-          startingNoInput.dispatchEvent(new Event('change'));
-        } else {
-          localStorage.setItem('autosave_starting_no', nextStartingNo);
+        if (shouldUpdateUI) {
+          if (startingNoInput) {
+            startingNoInput.value = nextStartingNo;
+            startingNoInput.dispatchEvent(new Event('change'));
+          } else {
+            localStorage.setItem('autosave_starting_no', nextStartingNo);
+          }
         }
 
         // Auto-run Face Fusion if checked
@@ -5026,6 +5044,16 @@ function initGeneralSettings() {
       localStorage.setItem('notify_sound_enabled', notifySoundCheckbox.checked);
     });
   }
+
+  // Load and initialize notification click action dropdown
+  const notifyClickActionSelect = document.getElementById('notify-click-action');
+  if (notifyClickActionSelect) {
+    const savedAction = localStorage.getItem('notify_click_action') || 'default-viewer';
+    notifyClickActionSelect.value = savedAction;
+    notifyClickActionSelect.addEventListener('change', () => {
+      localStorage.setItem('notify_click_action', notifyClickActionSelect.value);
+    });
+  }
 }
 
 function playNotificationSound() {
@@ -5058,6 +5086,7 @@ function playNotificationSound() {
 function triggerCompletionNotification(filePath) {
   const notifyEnabled = localStorage.getItem('notify_image_completed') === 'true';
   const soundEnabled = localStorage.getItem('notify_sound_enabled') === 'true';
+  const clickAction = localStorage.getItem('notify_click_action') || 'default-viewer';
   
   if (!notifyEnabled) return;
   
@@ -5071,6 +5100,7 @@ function triggerCompletionNotification(filePath) {
     window.api.showImageNotification({
       filePath: filePath,
       filename: filename,
+      clickAction: clickAction,
       silent: true // set to true because sound is manually played via playNotificationSound in the renderer to ensure consistency
     });
   }

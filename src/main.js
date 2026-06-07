@@ -1188,7 +1188,7 @@ ipcMain.handle('stop-watching-folder', async () => {
 
 const activeNotifications = new Set();
 
-ipcMain.handle('show-image-notification', async (event, { filePath, filename, silent }) => {
+ipcMain.handle('show-image-notification', async (event, { filePath, filename, silent, clickAction }) => {
   try {
     if (Notification.isSupported()) {
       const notification = new Notification({
@@ -1204,7 +1204,13 @@ ipcMain.handle('show-image-notification', async (event, { filePath, filename, si
         if (filePath) {
           const resolvedPath = path.resolve(filePath);
           if (fs.existsSync(resolvedPath)) {
-            shell.showItemInFolder(resolvedPath);
+            // Default action: open in default viewer
+            if (clickAction === 'open-folder') {
+              shell.showItemInFolder(resolvedPath);
+            } else {
+              // 'default-viewer' or fallback - open the file directly
+              shell.openPath(resolvedPath);
+            }
           }
         }
         activeNotifications.delete(notification);

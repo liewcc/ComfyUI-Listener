@@ -38,7 +38,7 @@
             <line x1="9" y1="8" x2="15" y2="8"></line>
             <line x1="17" y1="16" x2="23" y2="16"></line>
           </svg>
-          Parameters
+          Setup
           <span class="nav-badge" id="sidebar-params-badge" style="display: none;">0</span>
         </div>
         <div class="nav-item" data-tab="tab-facefusion">
@@ -491,9 +491,16 @@
                   <input type="checkbox" id="notify-image-completed" class="autosave-checkbox">
                   <label for="notify-image-completed">Notification on Image Completion</label>
                 </div>
-                <div class="checkbox-row" style="margin-bottom: 0;">
+                <div class="checkbox-row" style="margin-bottom: 12px;">
                   <input type="checkbox" id="notify-sound-enabled" class="autosave-checkbox">
                   <label for="notify-sound-enabled">Play Sound on Notification</label>
+                </div>
+                <div class="input-group" style="margin-bottom: 0;">
+                  <label for="notify-click-action">Notification Click Action</label>
+                  <select id="notify-click-action">
+                    <option value="default-viewer">Open in Default Viewer</option>
+                    <option value="open-folder">Open Folder</option>
+                  </select>
                 </div>
               </div>
             </div>
