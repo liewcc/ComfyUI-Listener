@@ -41,6 +41,9 @@ browser_session_sandbox/
 kill_app.bat
 kill_app.ps1
 
+# Rule documentation (local use only)
+rule.md
+
 # Test & Scratch scripts
 test/
 tests/
