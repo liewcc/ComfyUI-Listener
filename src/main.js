@@ -362,6 +362,31 @@ function getSisterFilePath(filePath) {
   return null;
 }
 
+// Helper to get Electron paths safely
+function safeGetPath(name) {
+  try {
+    return app.getPath(name);
+  } catch (_) {
+    return '';
+  }
+}
+
+// Helper to resolve defaultPath to a valid file path, folder path, or fallback
+function resolveDefaultPath(defaultPath, fallbackDir) {
+  if (defaultPath) {
+    if (fs.existsSync(defaultPath)) {
+      return defaultPath;
+    }
+    try {
+      const parentDir = path.dirname(defaultPath);
+      if (fs.existsSync(parentDir)) {
+        return parentDir;
+      }
+    } catch (_) {}
+  }
+  return fallbackDir || '';
+}
+
 // IPC handlers for local files and workflows
 ipcMain.handle('select-workflow-file', async () => {
   const defaultPath = path.join(app.getAppPath(), 'workflow');
@@ -499,8 +524,10 @@ ipcMain.handle('select-image-file', async (event, defaultPath) => {
     ],
     properties: ['openFile']
   };
-  if (defaultPath && fs.existsSync(defaultPath)) {
-    options.defaultPath = defaultPath;
+  const fallback = safeGetPath('pictures') || safeGetPath('home');
+  const resolved = resolveDefaultPath(defaultPath, fallback);
+  if (resolved) {
+    options.defaultPath = resolved;
   }
   const result = await dialog.showOpenDialog(mainWindow, options);
 
@@ -524,8 +551,10 @@ ipcMain.handle('select-ff-target-file', async (event, defaultPath) => {
     ],
     properties: ['openFile']
   };
-  if (defaultPath && fs.existsSync(defaultPath)) {
-    options.defaultPath = defaultPath;
+  const fallback = safeGetPath('videos') || safeGetPath('home');
+  const resolved = resolveDefaultPath(defaultPath, fallback);
+  if (resolved) {
+    options.defaultPath = resolved;
   }
   const result = await dialog.showOpenDialog(mainWindow, options);
 
@@ -550,8 +579,10 @@ ipcMain.handle('select-python-exe', async (event, defaultPath) => {
     ],
     properties: ['openFile']
   };
-  if (defaultPath && fs.existsSync(defaultPath)) {
-    options.defaultPath = defaultPath;
+  const fallback = safeGetPath('home');
+  const resolved = resolveDefaultPath(defaultPath, fallback);
+  if (resolved) {
+    options.defaultPath = resolved;
   }
   const result = await dialog.showOpenDialog(mainWindow, options);
 
@@ -572,8 +603,10 @@ ipcMain.handle('select-conda-exe', async (event, defaultPath) => {
     ],
     properties: ['openFile']
   };
-  if (defaultPath && fs.existsSync(defaultPath)) {
-    options.defaultPath = defaultPath;
+  const fallback = safeGetPath('home');
+  const resolved = resolveDefaultPath(defaultPath, fallback);
+  if (resolved) {
+    options.defaultPath = resolved;
   }
   const result = await dialog.showOpenDialog(mainWindow, options);
 
@@ -673,8 +706,10 @@ ipcMain.handle('select-output-folder', async (event, defaultPath) => {
     title: 'Select Folder to Auto-Save Generated Images',
     properties: ['openDirectory', 'createDirectory']
   };
-  if (defaultPath && fs.existsSync(defaultPath)) {
-    options.defaultPath = defaultPath;
+  const fallback = safeGetPath('documents') || safeGetPath('home');
+  const resolved = resolveDefaultPath(defaultPath, fallback);
+  if (resolved) {
+    options.defaultPath = resolved;
   }
   const result = await dialog.showOpenDialog(mainWindow, options);
 
@@ -690,8 +725,13 @@ ipcMain.handle('select-output-folder', async (event, defaultPath) => {
 // Optional: sourceImageUrl — if provided its existing PNG text chunks are merged in first
 ipcMain.handle('save-image-to-folder', async (event, { url, folderPath, filename, metadata, sourceImageUrl }) => {
   try {
+    // Auto-create the folder if it doesn't exist
     if (!fs.existsSync(folderPath)) {
-      return { ok: false, error: `Folder does not exist: ${folderPath}` };
+      try {
+        fs.mkdirSync(folderPath, { recursive: true });
+      } catch (mkdirError) {
+        return { ok: false, error: `Failed to create folder: ${mkdirError.message}` };
+      }
     }
 
     const response = await fetch(url);
@@ -843,6 +883,98 @@ ipcMain.handle('log-debug', async (event, { message }) => {
   try {
     fs.appendFileSync(DEBUG_LOG_PATH, `[${new Date().toISOString()}] ${message}\n`);
     return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+});
+
+// ─── ComfyUI Startup Script Handler ───────────────────────────────────────────
+ipcMain.handle('select-comfyui-start-script', async (event, defaultPath) => {
+  const options = {
+    title: 'Select ComfyUI Launcher (Executable or Script)',
+    filters: [
+      { name: 'Executable Files', extensions: ['exe'] },
+      { name: 'Batch Files', extensions: ['bat'] },
+      { name: 'PowerShell Scripts', extensions: ['ps1'] },
+      { name: 'Shell Scripts', extensions: ['sh'] },
+      { name: 'All Files', extensions: ['*'] }
+    ],
+    properties: ['openFile']
+  };
+  const fallback = safeGetPath('home');
+  const resolved = resolveDefaultPath(defaultPath, fallback);
+  if (resolved) {
+    options.defaultPath = resolved;
+  }
+
+  const result = await dialog.showOpenDialog(mainWindow, options);
+  
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+
+  return result.filePaths[0];
+});
+
+ipcMain.handle('start-comfyui', async (event, startScriptPath) => {
+  if (!startScriptPath) {
+    return { ok: false, error: 'No launcher path provided. Please configure the ComfyUI launcher in Settings.' };
+  }
+
+  if (!fs.existsSync(startScriptPath)) {
+    return { ok: false, error: `Launcher not found: ${startScriptPath}` };
+  }
+
+  try {
+    const { spawn } = require('child_process');
+    const ext = path.extname(startScriptPath).toLowerCase();
+    const scriptDir = path.dirname(startScriptPath);
+
+    let command = startScriptPath;
+    let args = [];
+    let shell = false;
+
+    if (ext === '.exe') {
+      // For executable files, launch directly
+      command = startScriptPath;
+      shell = false;
+    } else if (ext === '.bat') {
+      // For batch files, use cmd.exe
+      command = 'cmd.exe';
+      args = ['/c', startScriptPath];
+      shell = true;
+    } else if (ext === '.ps1') {
+      // For PowerShell scripts, use powershell
+      command = 'powershell.exe';
+      args = ['-ExecutionPolicy', 'Bypass', '-File', startScriptPath];
+      shell = true;
+    } else if (ext === '.sh') {
+      // For shell scripts on Unix-like systems
+      command = 'bash';
+      args = [startScriptPath];
+      shell = false;
+    } else {
+      // Try to execute directly for other types
+      command = startScriptPath;
+      shell = false;
+    }
+
+    const spawnOptions = {
+      cwd: scriptDir,
+      detached: true,  // Detach from parent process so it can run independently
+      stdio: 'ignore', // Don't capture output, let it run in its own window
+      shell: shell
+    };
+
+    const childProcess = spawn(command, args, spawnOptions);
+    
+    // Unref the process so it doesn't keep the parent alive
+    childProcess.unref();
+
+    return { 
+      ok: true, 
+      message: `ComfyUI launcher started: ${path.basename(startScriptPath)}` 
+    };
   } catch (error) {
     return { ok: false, error: error.message };
   }
@@ -1047,8 +1179,10 @@ ipcMain.handle('import-prompt-file', async (event, defaultPath) => {
     properties: ['openFile']
   };
 
-  if (defaultPath && fs.existsSync(defaultPath)) {
-    options.defaultPath = defaultPath;
+  const fallback = path.join(app.getAppPath(), 'workflow');
+  const resolved = resolveDefaultPath(defaultPath, fallback);
+  if (resolved) {
+    options.defaultPath = resolved;
   }
 
   const result = await dialog.showOpenDialog(mainWindow, options);
