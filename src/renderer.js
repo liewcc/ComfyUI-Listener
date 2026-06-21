@@ -404,8 +404,19 @@ function updateConnectionStatus(state, label) {
   const statusDot = document.getElementById('status-dot');
   const statusText = document.getElementById('status-text');
   
+  const wasConnected = statusDot ? statusDot.classList.contains('connected') : false;
+  
   statusDot.className = `status-dot ${state}`;
   statusText.textContent = label;
+
+  if (wasConnected && state === 'disconnected') {
+    if (window.api && typeof window.api.showNotification === 'function') {
+      window.api.showNotification({
+        title: 'ComfyUI Disconnected',
+        body: 'Connection to ComfyUI was lost.'
+      });
+    }
+  }
 
   // Sync the mini connection badge in the Execution Monitor header
   const monitorBadge = document.getElementById('monitor-connection-badge');
