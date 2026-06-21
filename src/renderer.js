@@ -60,6 +60,7 @@ let samplerNodeMaxMap = {};       // Maps nodeId -> max steps, discovered from l
 let estimatedSamplerCount = 0;   // Number of sampler nodes in the workflow (used for early estimate)
 let promptSamplerCountsMap = {}; // Maps prompt_id -> estimatedSamplerCount
 let promptJobStates = new Map(); // Maps prompt_id -> { paramValues, imageSlots, workflow }
+let jobsInQueueSession = 0;
 
 
 // Helper to map UI rotation ('none', '90', '180', '270') to ComfyUI ImageRotate input ('none', '90 degrees', '180 degrees', '270 degrees')
@@ -132,6 +133,7 @@ async function checkAndClearComfyHistory(promptId) {
       : (document.getElementById('autosave-clear-history')?.checked ?? false);
 
     promptJobStates.delete(promptId);
+    checkAndNotifyAllJobsComplete();
     savedPromptIds.delete(promptId);
     completedPromptIds.delete(promptId);
 
@@ -3029,6 +3031,7 @@ function handleWebSocketMessage(data) {
         }
         delete promptSamplerCountsMap[finishedPromptId];
         promptJobStates.delete(finishedPromptId);
+        jobsInQueueSession = 0;
       }
       activePromptId = null;
       pendingPromptId = false;
@@ -3064,6 +3067,7 @@ function handleWebSocketMessage(data) {
         }
         delete promptSamplerCountsMap[activePromptId];
         promptJobStates.delete(activePromptId);
+        jobsInQueueSession = 0;
       }
       activePromptId = null;
       pendingPromptId = false;
@@ -4245,6 +4249,7 @@ function initGeneration() {
         // Add to our queued prompt IDs tracking set
         if (result && result.prompt_id) {
           myQueuedPromptIds.add(result.prompt_id);
+          jobsInQueueSession++;
           promptSamplerCountsMap[result.prompt_id] = newSamplerCount;
           const ffSettings = captureFacefusionSettings();
           const prefixEl = document.getElementById('autosave-prefix');
@@ -5129,6 +5134,15 @@ function initGeneralSettings() {
     });
   }
 
+  const notifyAllJobsCheckbox = document.getElementById('notify_all_jobs_completed');
+  if (notifyAllJobsCheckbox) {
+    const savedNotifyAll = localStorage.getItem('notify_all_jobs_completed') === 'true';
+    notifyAllJobsCheckbox.checked = savedNotifyAll;
+    notifyAllJobsCheckbox.addEventListener('change', () => {
+      localStorage.setItem('notify_all_jobs_completed', notifyAllJobsCheckbox.checked);
+    });
+  }
+
   // Load and initialize notification click action dropdown
   const notifyClickActionSelect = document.getElementById('notify-click-action');
   if (notifyClickActionSelect) {
@@ -5187,6 +5201,24 @@ function triggerCompletionNotification(filePath) {
       clickAction: clickAction,
       silent: true // set to true because sound is manually played via playNotificationSound in the renderer to ensure consistency
     });
+  }
+}
+
+function checkAndNotifyAllJobsComplete() {
+  if (promptJobStates.size === 0) {
+    const notifyAllEnabled = localStorage.getItem('notify_all_jobs_completed') === 'true';
+    const soundEnabled = localStorage.getItem('notify_sound_enabled') === 'true';
+    if (notifyAllEnabled && jobsInQueueSession > 1) {
+      if (soundEnabled) playNotificationSound();
+      if (window.api && typeof window.api.showNotification === 'function') {
+        window.api.showNotification({
+          title: 'All Jobs Completed',
+          body: `Successfully finished all ${jobsInQueueSession} queued jobs.`,
+          silent: true
+        });
+      }
+    }
+    jobsInQueueSession = 0;
   }
 }
 

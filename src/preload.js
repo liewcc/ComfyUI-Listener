@@ -58,9 +58,14 @@ contextBridge.exposeInMainWorld('api', {
   extractPngSourcePath: (options) => ipcRenderer.invoke('extract-png-source-path', options),
   injectMetadataToFile: (options) => ipcRenderer.invoke('inject-metadata-to-file', options),
   showImageNotification: (options) => ipcRenderer.invoke('show-image-notification', options),
+  showNotification: (options) => ipcRenderer.invoke('show-notification', options),
   setHideCliFlag: (hide) => ipcRenderer.invoke('set-hide-cli', hide),
   getHideCliFlag: () => ipcRenderer.invoke('get-hide-cli'),
   saveJobHistory: (data) => ipcRenderer.invoke('save-job-history', data),
-  loadJobHistory: () => ipcRenderer.invoke('load-job-history')
+  loadJobHistory: () => ipcRenderer.invoke('load-job-history'),
+  // Launch ComfyUI startup script
+  startComfyUI: (startScriptPath) => ipcRenderer.invoke('start-comfyui', startScriptPath),
+  // Select ComfyUI startup script file
+  selectComfyUIStartScript: (defaultPath) => ipcRenderer.invoke('select-comfyui-start-script', defaultPath)
 });
 

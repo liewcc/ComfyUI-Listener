@@ -147,7 +147,7 @@
         <div class="card-body">
           <div class="output-path-container">
             <span class="path-label">Output Folder:</span>
-            <div class="output-path-display" id="output-path-display" title="Not configured - images will only remain in ComfyUI temp/history">Not configured</div>
+            <input type="text" id="output-path-input" class="output-path-input" placeholder="Not configured - images will only remain in ComfyUI temp/history" title="Enter output folder path or click Browse to select">
           </div>
           <div class="btn-row">
             <button id="btn-select-output-folder" class="btn btn-secondary btn-small">
@@ -490,6 +490,10 @@
                 <div class="checkbox-row" style="margin-bottom: 12px;">
                   <input type="checkbox" id="notify-image-completed" class="autosave-checkbox">
                   <label for="notify-image-completed">Notification on Image Completion</label>
+                </div>
+                <div class="checkbox-row" style="margin-bottom: 12px;">
+                  <input type="checkbox" id="notify_all_jobs_completed" class="autosave-checkbox">
+                  <label for="notify_all_jobs_completed">All Jobs Completed notification</label>
                 </div>
                 <div class="checkbox-row" style="margin-bottom: 12px;">
                   <input type="checkbox" id="notify-sound-enabled" class="autosave-checkbox">
@@ -839,6 +843,17 @@
                 <option value="none">None</option>
               </select>
             </div>
+            <div class="input-group">
+              <label for="comfyui-start-script">ComfyUI Launcher</label>
+              <div class="workflow-file-row">
+                <input type="text" id="comfyui-start-script" class="workflow-filename-input"
+                       readonly placeholder="e.g. C:\ComfyUI\ComfyUI.exe or C:\ComfyUI\run.bat">
+                <button id="btn-select-comfyui-start-script" class="btn btn-secondary btn-small"
+                        title="Select ComfyUI launcher (.exe, .bat, .ps1, or .sh)">
+                  <span>Browse…</span>
+                </button>
+              </div>
+            </div>
             <button id="btn-connect" class="btn btn-secondary" style="margin-top: 10px;">
               <span>Connect Service</span>
             </button>
@@ -869,6 +884,7 @@
       <p id="modal-error-msg" class="modal-error hidden"></p>
       <div class="modal-actions">
         <button id="btn-modal-configure" class="btn btn-primary">Go to Connection Settings</button>
+        <button id="btn-modal-start-comfyui" class="btn btn-secondary" title="Launch ComfyUI">Start ComfyUI</button>
         <button id="btn-modal-retry" class="btn btn-secondary">Retry Connection</button>
       </div>
     </div>

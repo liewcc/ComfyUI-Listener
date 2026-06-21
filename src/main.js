@@ -1365,6 +1365,28 @@ ipcMain.handle('show-image-notification', async (event, { filePath, filename, si
   }
 });
 
+ipcMain.handle('show-notification', async (event, { title, body, silent }) => {
+  try {
+    if (Notification.isSupported()) {
+      const notification = new Notification({
+        title: title,
+        body: body,
+        silent: silent,
+        icon: path.join(__dirname, 'icon.png')
+      });
+      activeNotifications.add(notification);
+      notification.on('click', () => { activeNotifications.delete(notification); });
+      notification.on('close', () => { activeNotifications.delete(notification); });
+      notification.show();
+      return { ok: true };
+    } else {
+      return { ok: false, error: 'Notifications not supported' };
+    }
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 
 
 
