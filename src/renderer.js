@@ -44,6 +44,8 @@ let isCompareMode = false;        // Active state of image comparison mode
 let selectedCompareSlot = 0;      // Current compare slot selected (0: Slot 1, 1: Slot 2, 2: Slot 3)
 let isStartupCheckActive = true;  // Flag to track the initial startup connection check
 let isRetryingConnection = false; // Flag to track if we are currently retrying the connection from the modal
+let isComfyUIStarting = false;    // Flag to track if ComfyUI is currently starting (suppress error messages during startup)
+let comfyUIStartRetryCount = 0;   // Counter for retry attempts during ComfyUI startup
 
 // Job Timer State
 let jobTimerInterval = null;
@@ -215,6 +217,9 @@ async function checkAndClearComfyHistory(promptId) {
 
 // Initialize DOM elements
 document.addEventListener('DOMContentLoaded', () => {
+  // Flag to track if we need to perform initial sync with ComfyUI
+  window.needsInitialSync = true;
+  
   initTabs();
   initConnection();
   initWorkflowLoader();
@@ -310,6 +315,25 @@ function initConnection() {
         comfyOutputDir = result;
         outputDirInput.value = result;
         localStorage.setItem('comfyui_output_dir', result);
+      }
+    });
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // ── ComfyUI Start Script ──────────────────────────────────────────────────
+  const startScriptInput = document.getElementById('comfyui-start-script');
+  const btnSelectStartScript = document.getElementById('btn-select-comfyui-start-script');
+  let comfyuiStartScript = localStorage.getItem('comfyui_start_script') || '';
+  if (comfyuiStartScript && startScriptInput) {
+    startScriptInput.value = comfyuiStartScript;
+  }
+  if (btnSelectStartScript && startScriptInput) {
+    btnSelectStartScript.addEventListener('click', async () => {
+      const result = await window.api.selectComfyUIStartScript(comfyuiStartScript);
+      if (result) {
+        comfyuiStartScript = result;
+        startScriptInput.value = result;
+        localStorage.setItem('comfyui_start_script', result);
       }
     });
   }
@@ -420,6 +444,14 @@ function updateConnectionStatus(state, label) {
   if (state === 'connected') {
     if (isStartupCheckActive) {
       isStartupCheckActive = false;
+      // Auto-switch to Generator tab on successful connection
+      switchToTab('tab-generator');
+    }
+    // Also switch to Generator if ComfyUI just finished starting
+    if (isComfyUIStarting) {
+      isComfyUIStarting = false;
+      comfyUIStartRetryCount = 0;
+      switchToTab('tab-generator');
     }
     if (isRetryingConnection) {
       isRetryingConnection = false;
@@ -439,8 +471,23 @@ function updateConnectionStatus(state, label) {
   } else if (state === 'disconnected') {
     if (isStartupCheckActive) {
       isStartupCheckActive = false;
-      showConnectionModal();
-      switchToTab('tab-service');
+      // Only show Service Connection page if ComfyUI is NOT starting
+      // If ComfyUI is starting, skip this and let auto-retry handle it
+      if (!isComfyUIStarting) {
+        showConnectionModal();
+        switchToTab('tab-service');
+      }
+    }
+    // If ComfyUI is starting, don't show error message; instead trigger auto-retry
+    if (isComfyUIStarting) {
+      comfyUIStartRetryCount++;
+      updateConnectionStatus('connecting', `Waiting for ComfyUI to start (${comfyUIStartRetryCount})...`);
+      setTimeout(() => {
+        if (isComfyUIStarting && !isConnecting) {
+          connectToComfyUI();
+        }
+      }, 2000);
+      return;
     }
     if (isRetryingConnection) {
       isRetryingConnection = false;
@@ -456,6 +503,7 @@ function updateConnectionStatus(state, label) {
         errorMsg.textContent = `Retry failed: ${label || 'Could not connect'}`;
         errorMsg.classList.remove('hidden');
       }
+      showConnectionModal();
     }
   }
 }
@@ -475,8 +523,16 @@ function setupWebSocket(wsUrl) {
     if (wsInstance !== myToken) return; // Stale handler — a newer connection replaced us
     updateConnectionStatus('connected', 'Connected');
     checkQueueStatus();
-    // Reconcile status of loaded jobs with the ComfyUI server
-    reconcileComfyJobs();
+    
+    // Perform initial sync if needed (only on first connection or after app restart)
+    if (window.needsInitialSync) {
+      window.needsInitialSync = false;
+      performInitialSync();
+    } else {
+      // Otherwise, do a regular reconciliation
+      reconcileComfyJobs();
+    }
+    
     // Refresh image previews that couldn't load before connection was ready (e.g. on app restart)
     refreshImagePreviews();
   };
@@ -4341,6 +4397,7 @@ function syncOutputSettingsUI() {
 function initOutputSettings() {
   const btnSelect = document.getElementById('btn-select-output-folder');
   const btnClear = document.getElementById('btn-clear-output-folder');
+  const outputPathInput = document.getElementById('output-path-input');
 
   const prefixInput = document.getElementById('autosave-prefix');
   const insertOriginalCheckbox = document.getElementById('autosave-insert-original');
@@ -4554,6 +4611,32 @@ function initOutputSettings() {
   updatePreview();
   checkAndIncrementStartingNo();
 
+  // Handle direct path input from the text box
+  if (outputPathInput) {
+    outputPathInput.addEventListener('input', () => {
+      const path = outputPathInput.value.trim();
+      if (path && path !== outputFolderPath) {
+        // Update the outputFolderPath when user types (will be validated on blur)
+      }
+    });
+
+    outputPathInput.addEventListener('blur', async () => {
+      const path = outputPathInput.value.trim();
+      if (path) {
+        if (watchFolderPath && path.toLowerCase() === watchFolderPath.toLowerCase()) {
+          showToast('Output Folder Error', 'Output Folder cannot be the same as Watch Folder.', 'error');
+          outputPathInput.value = outputFolderPath;
+          return;
+        }
+        outputFolderPath = path;
+        localStorage.setItem('output_folder_path', path);
+        updateOutputFolderUI();
+        showToast('Output Folder Updated', `Images will be auto-saved to:\n${path}`, 'success');
+        await checkAndIncrementStartingNo();
+      }
+    });
+  }
+
   btnSelect.addEventListener('click', async () => {
     try {
       const selectedDir = await window.api.selectOutputFolder(outputFolderPath);
@@ -4585,19 +4668,20 @@ function initOutputSettings() {
 }
 
 function updateOutputFolderUI() {
-  const display = document.getElementById('output-path-display');
+  const outputPathInput = document.getElementById('output-path-input');
   const btnClear = document.getElementById('btn-clear-output-folder');
 
-  if (outputFolderPath) {
-    display.textContent = outputFolderPath;
-    display.title = outputFolderPath;
-    display.classList.add('configured');
-    btnClear.disabled = false;
-  } else {
-    display.textContent = 'Not configured';
-    display.title = 'Not configured - images will only remain in ComfyUI temp/history';
-    display.classList.remove('configured');
-    btnClear.disabled = true;
+  if (outputPathInput) {
+    if (outputFolderPath) {
+      outputPathInput.value = outputFolderPath;
+    } else {
+      outputPathInput.value = '';
+    }
+    outputPathInput.title = outputFolderPath || 'Not configured - images will only remain in ComfyUI temp/history';
+  }
+  
+  if (btnClear) {
+    btnClear.disabled = !outputFolderPath;
   }
 }
 
@@ -5143,6 +5227,7 @@ function switchToTab(tabId) {
 function initConnectionModal() {
   const btnConfigure = document.getElementById('btn-modal-configure');
   const btnRetry = document.getElementById('btn-modal-retry');
+  const btnStartComfyUI = document.getElementById('btn-modal-start-comfyui');
   
   if (btnConfigure) {
     btnConfigure.addEventListener('click', () => {
@@ -5160,6 +5245,52 @@ function initConnectionModal() {
       if (btnConfigure) btnConfigure.disabled = true;
       
       connectToComfyUI();
+    });
+  }
+
+  if (btnStartComfyUI) {
+    btnStartComfyUI.addEventListener('click', async () => {
+      const startScriptPath = localStorage.getItem('comfyui_start_script');
+      
+      if (!startScriptPath) {
+        alert('Please configure the ComfyUI launcher in Service Connection settings first.\n\nYou can select your ComfyUI executable (.exe), or a startup script (.bat, .ps1, etc.)');
+        switchToTab('tab-service');
+        hideConnectionModal();
+        return;
+      }
+
+      btnStartComfyUI.disabled = true;
+      btnStartComfyUI.textContent = 'Starting...';
+
+      try {
+        const result = await window.api.startComfyUI(startScriptPath);
+        
+        if (result.ok) {
+          btnStartComfyUI.textContent = 'Waiting for ComfyUI...';
+          // Show modal so user can see the startup progress
+          showConnectionModal();
+          
+          // Mark that ComfyUI is starting and enable auto-retry without error messages
+          isComfyUIStarting = true;
+          comfyUIStartRetryCount = 0;
+          
+          // Wait a bit longer for ComfyUI to fully start (5 seconds)
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          
+          // Start auto-retry process
+          if (isComfyUIStarting && !isConnecting) {
+            connectToComfyUI();
+          }
+        } else {
+          alert(`Failed to start ComfyUI: ${result.error}`);
+          btnStartComfyUI.textContent = 'Start ComfyUI';
+          btnStartComfyUI.disabled = false;
+        }
+      } catch (error) {
+        alert(`Error starting ComfyUI: ${error.message}`);
+        btnStartComfyUI.textContent = 'Start ComfyUI';
+        btnStartComfyUI.disabled = false;
+      }
     });
   }
 }
@@ -5470,9 +5601,9 @@ async function loadJobsFromDisk() {
       // Update the UI
       refreshJobsListIfVisible();
       
-      // Reconcile status of loaded jobs with the ComfyUI server if connection is already open
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        reconcileComfyJobs();
+      // 标记需要进行初始同步（在 WebSocket 连接完成后）
+      if (!window.needsInitialSync) {
+        window.needsInitialSync = true;
       }
 
       // Resume Facefusion queue if there are pending jobs and process is not running
@@ -5482,6 +5613,74 @@ async function loadJobsFromDisk() {
     }
   } catch (err) {
     console.error('[History] Failed to load job history on startup:', err);
+  }
+}
+
+async function performInitialSync() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
+    const response = await comfyFetch('/queue');
+    const data = await response.json();
+    
+    // ComfyUI queue arrays are formatted as [prompt_no, prompt_id, ...]
+    const runningIds = (data.queue_running || []).map(item => item[1]);
+    const pendingIds = (data.queue_pending || []).map(item => item[1]);
+    
+    let historyData = null;
+    try {
+      const historyResp = await comfyFetch('/history');
+      historyData = await historyResp.json();
+    } catch (_) {
+      // Best-effort check if history fails
+    }
+
+    let changed = false;
+    
+    // For each local job, determine its actual status from ComfyUI
+    jobHistoryList.forEach(job => {
+      const oldStatus = job.status;
+      
+      if (runningIds.includes(job.promptId)) {
+        // Job is currently running in ComfyUI
+        job.status = 'running';
+        myQueuedPromptIds.add(job.promptId);
+        activePromptId = job.promptId;
+      } else if (pendingIds.includes(job.promptId)) {
+        // Job is pending in ComfyUI queue
+        job.status = 'pending';
+        myQueuedPromptIds.add(job.promptId);
+      } else if (historyData && historyData[job.promptId]) {
+        // Job is in ComfyUI history
+        const entry = historyData[job.promptId];
+        const statusStr = entry.status && entry.status.status_str;
+        job.status = statusStr === 'success' ? 'completed' : 'failed';
+      } else {
+        // Job not found in ComfyUI at all - keep its current status (pending/running)
+        // This handles the case where ComfyUI was restarted and lost the queue
+        // We want to preserve 'pending' jobs in case they can be resubmitted
+        if (job.status !== 'pending' && job.status !== 'running') {
+          // If it was already marked failed/completed/interrupted, keep that status
+        } else {
+          // For pending/running jobs not in ComfyUI, keep them pending so user can see them
+          job.status = 'pending';
+        }
+      }
+      
+      if (job.status !== oldStatus) {
+        changed = true;
+      }
+    });
+
+    if (changed) {
+      refreshJobsListIfVisible();
+      saveJobsToDisk();
+    }
+
+    if (typeof updateComfyWorkingStatus === 'function') {
+      updateComfyWorkingStatus(activePromptId !== null);
+    }
+  } catch (err) {
+    console.error('[History] Initial sync failed:', err);
   }
 }
 
@@ -5540,7 +5739,7 @@ async function reconcileComfyJobs() {
               changed = true;
             }
           } else {
-            // Not in queue, not in history -> interrupted/lost
+            // Not in queue, not in history -> mark as interrupted
             if (job.status !== 'interrupted') {
               job.status = 'interrupted';
               changed = true;

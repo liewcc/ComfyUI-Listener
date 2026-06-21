@@ -917,10 +917,12 @@ ipcMain.handle('select-comfyui-start-script', async (event, defaultPath) => {
 });
 
 ipcMain.handle('start-comfyui', async (event, startScriptPath) => {
+  fs.appendFileSync(DEBUG_LOG_PATH, `[${new Date().toISOString()}] [start-comfyui] received path: "${startScriptPath}"\n`);
   if (!startScriptPath) {
     return { ok: false, error: 'No launcher path provided. Please configure the ComfyUI launcher in Settings.' };
   }
 
+  fs.appendFileSync(DEBUG_LOG_PATH, `[${new Date().toISOString()}] [start-comfyui] existsSync("${startScriptPath}") = ${fs.existsSync(startScriptPath)}\n`);
   if (!fs.existsSync(startScriptPath)) {
     return { ok: false, error: `Launcher not found: ${startScriptPath}` };
   }
@@ -935,19 +937,21 @@ ipcMain.handle('start-comfyui', async (event, startScriptPath) => {
     let shell = false;
 
     if (ext === '.exe') {
-      // For executable files, launch directly
+      // For executable files, launch directly (no shell wrapping needed)
       command = startScriptPath;
       shell = false;
     } else if (ext === '.bat') {
-      // For batch files, use cmd.exe
+      // For batch files, invoke cmd.exe explicitly — shell must stay false
+      // to avoid double-wrapping (cmd /c "cmd /c script.bat") which breaks
+      // with detached:true + stdio:'ignore' on Windows
       command = 'cmd.exe';
       args = ['/c', startScriptPath];
-      shell = true;
+      shell = false;
     } else if (ext === '.ps1') {
-      // For PowerShell scripts, use powershell
+      // For PowerShell scripts — same rationale: no shell wrapping
       command = 'powershell.exe';
       args = ['-ExecutionPolicy', 'Bypass', '-File', startScriptPath];
-      shell = true;
+      shell = false;
     } else if (ext === '.sh') {
       // For shell scripts on Unix-like systems
       command = 'bash';
@@ -967,14 +971,11 @@ ipcMain.handle('start-comfyui', async (event, startScriptPath) => {
     };
 
     const childProcess = spawn(command, args, spawnOptions);
-    
-    // Unref the process so it doesn't keep the parent alive
+    childProcess.on('error', (err) => {
+      console.error(`[start-comfyui] spawn error: ${err.message}`);
+    });
     childProcess.unref();
-
-    return { 
-      ok: true, 
-      message: `ComfyUI launcher started: ${path.basename(startScriptPath)}` 
-    };
+    return { ok: true, message: `ComfyUI launcher started: ${path.basename(startScriptPath)}` };
   } catch (error) {
     return { ok: false, error: error.message };
   }
