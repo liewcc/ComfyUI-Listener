@@ -917,6 +917,81 @@ ipcMain.handle('select-comfyui-start-script', async (event, defaultPath) => {
   return result.filePaths[0];
 });
 
+// ─── ComfyUI Server Log Tail ──────────────────────────────────────────────────
+// The generated launcher redirects the server's stdout to a file. Streaming new
+// lines to the renderer lets the startup modal report what ComfyUI is actually
+// doing instead of only how long it has been doing it.
+//
+// ponytail: polls every 500ms rather than using fs.watch — on Windows, watching
+// a file another process is appending to fires unreliably. Ceiling: progress
+// lags by up to half a second, which is invisible next to a minute-long start.
+const { StringDecoder } = require('string_decoder');
+
+let comfyLogTimer = null;
+
+function stopComfyLogTail() {
+  if (comfyLogTimer) {
+    clearInterval(comfyLogTimer);
+    comfyLogTimer = null;
+  }
+}
+
+ipcMain.handle('watch-comfyui-log', (event) => {
+  stopComfyLogTail();
+
+  const logPath = comfyDetect.serverLogPath(safeGetPath('userData'));
+  const decoder = new StringDecoder('utf8');
+  let offset = 0;
+  let partialLine = '';
+
+  comfyLogTimer = setInterval(() => {
+    if (event.sender.isDestroyed()) {
+      stopComfyLogTail();
+      return;
+    }
+
+    let size;
+    try {
+      size = fs.statSync(logPath).size;
+    } catch (_) {
+      return; // launcher has not created the log yet
+    }
+    // A restart truncates the log, so rewind rather than waiting for it to grow
+    // back past a stale offset.
+    if (size < offset) {
+      offset = 0;
+      partialLine = '';
+    }
+    if (size === offset) return;
+
+    let chunk;
+    try {
+      const fd = fs.openSync(logPath, 'r');
+      chunk = Buffer.alloc(size - offset);
+      fs.readSync(fd, chunk, 0, chunk.length, offset);
+      fs.closeSync(fd);
+    } catch (_) {
+      return;
+    }
+    offset = size;
+
+    // StringDecoder holds back bytes that split a multi-byte character across
+    // reads; partialLine does the same for a line split across reads.
+    const lines = (partialLine + decoder.write(chunk)).split(/\r?\n/);
+    partialLine = lines.pop();
+
+    const clean = lines.map(l => l.trim()).filter(Boolean);
+    if (clean.length) event.sender.send('comfyui-log', clean);
+  }, 500);
+
+  return { ok: true, logPath };
+});
+
+ipcMain.handle('unwatch-comfyui-log', () => {
+  stopComfyLogTail();
+  return { ok: true };
+});
+
 // Find this machine's ComfyUI backend and generate a launcher that starts the
 // server alone — see src/comfyui-detect.js for the probing strategy.
 ipcMain.handle('detect-comfyui', async (event, { port } = {}) => {

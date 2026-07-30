@@ -7,7 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { detect, buildLauncherScripts } = require('./comfyui-detect');
+const { detect, buildLauncherScripts, serverLogPath } = require('./comfyui-detect');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'comfy-detect-'));
 const appDataDir = path.join(root, 'AppData');
@@ -54,7 +54,8 @@ assert.ok(!candidate.extraArgs.includes('9999'), 'stripped --port must take its 
 assert.ok(candidate.extraArgs.includes('--enable-manager'), 'other launch args are kept');
 
 const batPath = path.join(root, 'start_comfyui_server.bat');
-const { bat, vbs } = buildLauncherScripts(candidate, 8188, batPath);
+const logPath = serverLogPath(root);
+const { bat, vbs } = buildLauncherScripts(candidate, 8188, batPath, logPath);
 
 // Values are quoted unconditionally — cmd strips them before python sees them.
 assert.ok(bat.includes('--port "8188"'), 'bat carries the requested port');
@@ -62,6 +63,12 @@ assert.ok(bat.includes(`"${candidate.python}"`), 'interpreter is quoted');
 assert.ok(bat.includes(`cd /d "${candidate.comfyDir}"`), 'runs from the ComfyUI directory');
 assert.ok(bat.includes('"D:\\ComfyUI Output"'), 'paths with spaces are quoted');
 assert.ok(!/^pause/m.test(bat), 'no pause — the window is hidden and would hang');
+
+// Progress reporting depends on the log being written line-by-line: without -u
+// Python block-buffers redirected stdout and the modal would sit silent.
+assert.ok(/-u\s+main\.py/.test(bat), 'python runs unbuffered so the log streams');
+assert.ok(bat.includes(`> "${logPath}" 2>&1`), 'stdout and stderr are redirected to the log');
+assert.ok(!bat.includes(`>> "${logPath}"`), 'log is truncated per run, not appended');
 
 assert.ok(vbs.includes(`"""${batPath}"""`), 'vbs quotes the bat path for Run()');
 assert.ok(vbs.includes(', 0, False'), 'vbs must run the bat with a hidden window');

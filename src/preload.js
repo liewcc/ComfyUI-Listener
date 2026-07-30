@@ -68,6 +68,10 @@ contextBridge.exposeInMainWorld('api', {
   // Select ComfyUI startup script file
   selectComfyUIStartScript: (defaultPath) => ipcRenderer.invoke('select-comfyui-start-script', defaultPath),
   // Find this machine's ComfyUI install and generate a server-only launcher
-  detectComfyUI: (options) => ipcRenderer.invoke('detect-comfyui', options)
+  detectComfyUI: (options) => ipcRenderer.invoke('detect-comfyui', options),
+  // Stream the ComfyUI server log while it starts up
+  watchComfyUILog: () => ipcRenderer.invoke('watch-comfyui-log'),
+  unwatchComfyUILog: () => ipcRenderer.invoke('unwatch-comfyui-log'),
+  onComfyUILog: (callback) => ipcRenderer.on('comfyui-log', (_event, lines) => callback(lines))
 });
 

@@ -221,7 +221,10 @@ async function checkAndClearComfyHistory(promptId) {
 document.addEventListener('DOMContentLoaded', () => {
   // Flag to track if we need to perform initial sync with ComfyUI
   window.needsInitialSync = true;
-  
+
+  // Registered before initConnection() so no startup log line is missed.
+  window.api.onComfyUILog(applyComfyStartupLines);
+
   initTabs();
   initConnection();
   initWorkflowLoader();
@@ -386,9 +389,14 @@ function initConnection() {
   // once for anyone still pointing at the Comfy Desktop GUI — that starts a
   // whole Electron app when all this listener needs is the backend. Only ever
   // done once, so a deliberate re-pick is never overwritten.
+  // Our own generated launcher is disposable and rebuilt from scratch each
+  // time, so refreshing it on every start keeps it in step with app updates
+  // (the redirect that feeds startup progress arrived this way) and with a
+  // ComfyUI install that has since moved.
   const looksLikeDesktopGui = /comfy[ _-]?desktop\.exe$/i.test(comfyuiStartScript);
+  const isGeneratedLauncher = /start_comfyui_server\.vbs$/i.test(comfyuiStartScript);
   let launcherReady = Promise.resolve();
-  if (!comfyuiStartScript ||
+  if (!comfyuiStartScript || isGeneratedLauncher ||
       (looksLikeDesktopGui && !localStorage.getItem('comfyui_launcher_migrated'))) {
     localStorage.setItem('comfyui_launcher_migrated', '1');
     launcherReady = detectComfyUILauncher({ silent: true });
@@ -5327,6 +5335,18 @@ const MODAL_IDLE_MESSAGE = 'ComfyUI is not connected. Please ensure ComfyUI is r
 
 let comfyStartupTimer = null;
 let comfyStartupStartedAt = 0;
+let comfyStartupPhase = '';   // human label for the furthest phase seen so far
+let comfyStartupDetail = '';  // what the server printed most recently
+
+// Phase matching lives in comfyui-startup-phases.js so it can be checked
+// against real ComfyUI output without a browser.
+function applyComfyStartupLines(lines) {
+  const next = advanceComfyStartup(
+    { phase: comfyStartupPhase, detail: comfyStartupDetail }, lines);
+  comfyStartupPhase = next.phase;
+  comfyStartupDetail = next.detail;
+  if (comfyStartupTimer) renderComfyStartupProgress();
+}
 
 function setModalStatus(title, message, progress) {
   const titleEl = document.getElementById('modal-title');
@@ -5342,19 +5362,22 @@ function setModalStatus(title, message, progress) {
 
 function renderComfyStartupProgress() {
   const secs = Math.round((Date.now() - comfyStartupStartedAt) / 1000);
-  const attempt = comfyUIStartRetryCount > 0 ? `, connection attempt ${comfyUIStartRetryCount}` : '';
-  setModalStatus(
-    'Starting ComfyUI',
-    'Waiting for the ComfyUI server to finish loading. A first launch can take a minute while it imports nodes.',
-    `Elapsed ${secs}s${attempt}`
-  );
+  // Falls back to a generic message when no log is available — a hand-picked
+  // launcher writes nowhere we can read.
+  const message = comfyStartupPhase ||
+    'Waiting for the ComfyUI server to finish loading. A first launch can take a minute while it imports nodes.';
+  const detail = comfyStartupDetail ? ` · ${comfyStartupDetail.slice(0, 90)}` : '';
+  setModalStatus('Starting ComfyUI', message, `Elapsed ${secs}s${detail}`);
 }
 
 // Ticks once a second so the counter moves between the 2-second retries.
 function beginComfyStartupProgress() {
   comfyStartupStartedAt = Date.now();
+  comfyStartupPhase = '';
+  comfyStartupDetail = '';
   if (comfyStartupTimer) clearInterval(comfyStartupTimer);
   comfyStartupTimer = setInterval(renderComfyStartupProgress, 1000);
+  window.api.watchComfyUILog();
   renderComfyStartupProgress();
 }
 
@@ -5363,6 +5386,7 @@ function endComfyStartupProgress() {
     clearInterval(comfyStartupTimer);
     comfyStartupTimer = null;
   }
+  window.api.unwatchComfyUILog();
 }
 
 function resetModalStatus() {
