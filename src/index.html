@@ -847,11 +847,19 @@
               <label for="comfyui-start-script">ComfyUI Launcher</label>
               <div class="workflow-file-row">
                 <input type="text" id="comfyui-start-script" class="workflow-filename-input"
-                       readonly placeholder="e.g. C:\ComfyUI\ComfyUI.exe or C:\ComfyUI\run.bat">
+                       readonly placeholder="Click Detect to find ComfyUI on this computer">
+                <button id="btn-detect-comfyui" class="btn btn-secondary btn-small"
+                        title="Find ComfyUI on this computer and build a server-only launcher">
+                  <span>Detect</span>
+                </button>
                 <button id="btn-select-comfyui-start-script" class="btn btn-secondary btn-small"
-                        title="Select ComfyUI launcher (.exe, .bat, .ps1, or .sh)">
+                        title="Select ComfyUI launcher (.exe, .bat, .vbs, .ps1, or .sh)">
                   <span>Browse…</span>
                 </button>
+              </div>
+              <div class="checkbox-row" style="margin-top: 8px;">
+                <input type="checkbox" id="comfyui-auto-start" class="autosave-checkbox" checked>
+                <label for="comfyui-auto-start">Start ComfyUI automatically if it is not running</label>
               </div>
             </div>
             <button id="btn-connect" class="btn btn-secondary" style="margin-top: 10px;">
@@ -879,8 +887,9 @@
           <line x1="12" y1="17" x2="12.01" y2="17"></line>
         </svg>
       </div>
-      <h3 class="modal-title">Connection Required</h3>
-      <p class="modal-message">ComfyUI is not connected. Please ensure ComfyUI is running and your service connection settings are correct.</p>
+      <h3 id="modal-title" class="modal-title">Connection Required</h3>
+      <p id="modal-message" class="modal-message">ComfyUI is not connected. Please ensure ComfyUI is running and your service connection settings are correct.</p>
+      <p id="modal-progress" class="modal-message hidden" style="opacity: 0.75; font-size: 0.9em;"></p>
       <p id="modal-error-msg" class="modal-error hidden"></p>
       <div class="modal-actions">
         <button id="btn-modal-configure" class="btn btn-primary">Go to Connection Settings</button>

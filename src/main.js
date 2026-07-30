@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const zlib = require('zlib');
+const comfyDetect = require('./comfyui-detect');
 
 // ─── PNG Metadata Helpers ──────────────────────────────────────────────────────
 // CRC32 lookup table for PNG chunk integrity
@@ -916,6 +917,29 @@ ipcMain.handle('select-comfyui-start-script', async (event, defaultPath) => {
   return result.filePaths[0];
 });
 
+// Find this machine's ComfyUI backend and generate a launcher that starts the
+// server alone — see src/comfyui-detect.js for the probing strategy.
+ipcMain.handle('detect-comfyui', async (event, { port } = {}) => {
+  if (process.platform !== 'win32') {
+    return { ok: false, error: 'Automatic detection is Windows-only. Use Browse… to select your ComfyUI launcher.' };
+  }
+
+  const candidate = comfyDetect.detect({
+    appDataDir: safeGetPath('appData'),
+    homeDir: safeGetPath('home')
+  });
+  if (!candidate) {
+    return { ok: false, error: 'No ComfyUI installation found in the usual locations. Use Browse… to select your launcher manually.' };
+  }
+
+  try {
+    const launcherPath = comfyDetect.writeLauncher(candidate, port, safeGetPath('userData'));
+    return { ok: true, launcherPath, comfyDir: candidate.comfyDir, kind: candidate.kind };
+  } catch (error) {
+    return { ok: false, error: `Found ${candidate.comfyDir} but could not write the launcher: ${error.message}` };
+  }
+});
+
 ipcMain.handle('start-comfyui', async (event, startScriptPath) => {
   fs.appendFileSync(DEBUG_LOG_PATH, `[${new Date().toISOString()}] [start-comfyui] received path: "${startScriptPath}"\n`);
   if (!startScriptPath) {
@@ -946,6 +970,11 @@ ipcMain.handle('start-comfyui', async (event, startScriptPath) => {
       // with detached:true + stdio:'ignore' on Windows
       command = 'cmd.exe';
       args = ['/c', startScriptPath];
+      shell = false;
+    } else if (ext === '.vbs') {
+      // Generated hidden-window launcher — wscript runs it without a console
+      command = 'wscript.exe';
+      args = ['//nologo', startScriptPath];
       shell = false;
     } else if (ext === '.ps1') {
       // For PowerShell scripts — same rationale: no shell wrapping

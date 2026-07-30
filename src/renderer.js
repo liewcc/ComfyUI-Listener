@@ -339,6 +339,60 @@ function initConnection() {
       }
     });
   }
+
+  // Detection generates a launcher that starts only the ComfyUI server, on
+  // whichever machine this copy of the app was installed on. The port comes
+  // from the address above so the generated launcher and the listener agree.
+  async function detectComfyUILauncher({ silent } = {}) {
+    let port = 8188;
+    try {
+      port = Number(new URL(urlInput.value || comfyuiUrl).port) || 8188;
+    } catch (_) { /* no address configured yet — ComfyUI's own default applies */ }
+
+    const result = await window.api.detectComfyUI({ port });
+
+    if (result.ok) {
+      comfyuiStartScript = result.launcherPath;
+      if (startScriptInput) startScriptInput.value = result.launcherPath;
+      localStorage.setItem('comfyui_start_script', result.launcherPath);
+      showToast('ComfyUI Found', `Server-only launcher created for ${result.comfyDir}`, 'success');
+    } else if (!silent) {
+      alert(result.error);
+    }
+    return result.ok;
+  }
+
+  const btnDetectComfyUI = document.getElementById('btn-detect-comfyui');
+  if (btnDetectComfyUI) {
+    btnDetectComfyUI.addEventListener('click', async () => {
+      btnDetectComfyUI.disabled = true;
+      try {
+        await detectComfyUILauncher();
+      } finally {
+        btnDetectComfyUI.disabled = false;
+      }
+    });
+  }
+
+  const autoStartCheckbox = document.getElementById('comfyui-auto-start');
+  if (autoStartCheckbox) {
+    autoStartCheckbox.checked = autoStartComfyUIEnabled();
+    autoStartCheckbox.addEventListener('change', () => {
+      localStorage.setItem('comfyui_auto_start', autoStartCheckbox.checked ? 'true' : 'false');
+    });
+  }
+
+  // Fill the launcher in without bothering the user on a fresh install, and
+  // once for anyone still pointing at the Comfy Desktop GUI — that starts a
+  // whole Electron app when all this listener needs is the backend. Only ever
+  // done once, so a deliberate re-pick is never overwritten.
+  const looksLikeDesktopGui = /comfy[ _-]?desktop\.exe$/i.test(comfyuiStartScript);
+  let launcherReady = Promise.resolve();
+  if (!comfyuiStartScript ||
+      (looksLikeDesktopGui && !localStorage.getItem('comfyui_launcher_migrated'))) {
+    localStorage.setItem('comfyui_launcher_migrated', '1');
+    launcherReady = detectComfyUILauncher({ silent: true });
+  }
   // ─────────────────────────────────────────────────────────────────────────
 
   // Load saved preview method from localStorage (default: 'auto')
@@ -356,8 +410,10 @@ function initConnection() {
     connectToComfyUI();
   });
 
-  // Try auto-connecting on start
-  connectToComfyUI();
+  // Try auto-connecting on start. On a fresh install this waits for detection
+  // to finish first — otherwise the auto-start below would look up the launcher
+  // before it had been written and conclude none is configured.
+  launcherReady.then(() => connectToComfyUI(), () => connectToComfyUI());
 }
 
 function connectToComfyUI() {
@@ -480,6 +536,8 @@ function updateConnectionStatus(state, label) {
       errorMsg.textContent = '';
       errorMsg.classList.add('hidden');
     }
+    // Stop the ticker and leave the modal ready for the next failure.
+    resetModalStatus();
     hideConnectionModal();
   } else if (state === 'disconnected') {
     if (isStartupCheckActive) {
@@ -489,11 +547,20 @@ function updateConnectionStatus(state, label) {
       if (!isComfyUIStarting) {
         showConnectionModal();
         switchToTab('tab-service');
+        // Nothing is listening yet, so start the server ourselves rather than
+        // making the user click through the modal. startComfyUIServer() hands
+        // back to the auto-retry branch below once the launcher is running.
+        window.api.logDebug({ message: `startup auto-start check: enabled=${autoStartComfyUIEnabled()} launcher=${localStorage.getItem('comfyui_start_script')}` });
+        if (autoStartComfyUIEnabled() && localStorage.getItem('comfyui_start_script')) {
+          startComfyUIServer();
+          return;
+        }
       }
     }
     // If ComfyUI is starting, don't show error message; instead trigger auto-retry
     if (isComfyUIStarting) {
       comfyUIStartRetryCount++;
+      renderComfyStartupProgress();
       updateConnectionStatus('connecting', `Waiting for ComfyUI to start (${comfyUIStartRetryCount})...`);
       setTimeout(() => {
         if (isComfyUIStarting && !isConnecting) {
@@ -5250,6 +5317,59 @@ function showToast(title, message, type = 'success', action = null) {
 function dismissToast() {}
 
 // 8b. Connection Modal Helpers & Initialization
+// ─── Connection Modal Progress ────────────────────────────────────────────────
+// A cold ComfyUI start spends a minute importing nodes with nothing to show for
+// it, so the modal reports which step it is on and keeps a counter ticking —
+// otherwise a static "not connected" message reads as a hung app.
+
+const MODAL_IDLE_TITLE = 'Connection Required';
+const MODAL_IDLE_MESSAGE = 'ComfyUI is not connected. Please ensure ComfyUI is running and your service connection settings are correct.';
+
+let comfyStartupTimer = null;
+let comfyStartupStartedAt = 0;
+
+function setModalStatus(title, message, progress) {
+  const titleEl = document.getElementById('modal-title');
+  const messageEl = document.getElementById('modal-message');
+  const progressEl = document.getElementById('modal-progress');
+  if (titleEl) titleEl.textContent = title;
+  if (messageEl) messageEl.textContent = message;
+  if (progressEl) {
+    progressEl.textContent = progress || '';
+    progressEl.classList.toggle('hidden', !progress);
+  }
+}
+
+function renderComfyStartupProgress() {
+  const secs = Math.round((Date.now() - comfyStartupStartedAt) / 1000);
+  const attempt = comfyUIStartRetryCount > 0 ? `, connection attempt ${comfyUIStartRetryCount}` : '';
+  setModalStatus(
+    'Starting ComfyUI',
+    'Waiting for the ComfyUI server to finish loading. A first launch can take a minute while it imports nodes.',
+    `Elapsed ${secs}s${attempt}`
+  );
+}
+
+// Ticks once a second so the counter moves between the 2-second retries.
+function beginComfyStartupProgress() {
+  comfyStartupStartedAt = Date.now();
+  if (comfyStartupTimer) clearInterval(comfyStartupTimer);
+  comfyStartupTimer = setInterval(renderComfyStartupProgress, 1000);
+  renderComfyStartupProgress();
+}
+
+function endComfyStartupProgress() {
+  if (comfyStartupTimer) {
+    clearInterval(comfyStartupTimer);
+    comfyStartupTimer = null;
+  }
+}
+
+function resetModalStatus() {
+  endComfyStartupProgress();
+  setModalStatus(MODAL_IDLE_TITLE, MODAL_IDLE_MESSAGE, '');
+}
+
 function showConnectionModal() {
   const modal = document.getElementById('connection-modal');
   if (modal) modal.classList.remove('hidden');
@@ -5292,49 +5412,70 @@ function initConnectionModal() {
   }
 
   if (btnStartComfyUI) {
-    btnStartComfyUI.addEventListener('click', async () => {
-      const startScriptPath = localStorage.getItem('comfyui_start_script');
-      
-      if (!startScriptPath) {
-        alert('Please configure the ComfyUI launcher in Service Connection settings first.\n\nYou can select your ComfyUI executable (.exe), or a startup script (.bat, .ps1, etc.)');
-        switchToTab('tab-service');
-        hideConnectionModal();
-        return;
-      }
+    btnStartComfyUI.addEventListener('click', () => startComfyUIServer());
+  }
+}
 
-      btnStartComfyUI.disabled = true;
-      btnStartComfyUI.textContent = 'Starting...';
+// Opt-out, not opt-in: the listener is useless without a backend, so starting
+// one on launch is the expected behaviour. The switch exists because the server
+// is a heavy GPU process and some sessions only browse job history.
+function autoStartComfyUIEnabled() {
+  return localStorage.getItem('comfyui_auto_start') !== 'false';
+}
 
-      try {
-        const result = await window.api.startComfyUI(startScriptPath);
-        
-        if (result.ok) {
-          btnStartComfyUI.textContent = 'Waiting for ComfyUI...';
-          // Show modal so user can see the startup progress
-          showConnectionModal();
-          
-          // Mark that ComfyUI is starting and enable auto-retry without error messages
-          isComfyUIStarting = true;
-          comfyUIStartRetryCount = 0;
-          
-          // Wait a bit longer for ComfyUI to fully start (5 seconds)
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          
-          // Start auto-retry process
-          if (isComfyUIStarting && !isConnecting) {
-            connectToComfyUI();
-          }
-        } else {
-          alert(`Failed to start ComfyUI: ${result.error}`);
-          btnStartComfyUI.textContent = 'Start ComfyUI';
-          btnStartComfyUI.disabled = false;
-        }
-      } catch (error) {
-        alert(`Error starting ComfyUI: ${error.message}`);
-        btnStartComfyUI.textContent = 'Start ComfyUI';
-        btnStartComfyUI.disabled = false;
-      }
-    });
+// Launches the configured ComfyUI launcher and hands off to the auto-retry loop
+// in updateConnectionStatus(). Shared by the modal's button and the automatic
+// start on app launch, so both report progress the same way.
+async function startComfyUIServer() {
+  const btnStartComfyUI = document.getElementById('btn-modal-start-comfyui');
+  const setButton = (text, disabled) => {
+    if (!btnStartComfyUI) return;
+    btnStartComfyUI.textContent = text;
+    btnStartComfyUI.disabled = disabled;
+  };
+
+  const startScriptPath = localStorage.getItem('comfyui_start_script');
+  if (!startScriptPath) {
+    alert('Please configure the ComfyUI launcher in Service Connection settings first.\n\nYou can select your ComfyUI executable (.exe), or a startup script (.bat, .ps1, etc.)');
+    switchToTab('tab-service');
+    hideConnectionModal();
+    return false;
+  }
+
+  setButton('Starting...', true);
+  showConnectionModal();
+  setModalStatus('Starting ComfyUI', 'Launching the ComfyUI server…', startScriptPath);
+
+  try {
+    const result = await window.api.startComfyUI(startScriptPath);
+
+    if (!result.ok) {
+      resetModalStatus();
+      alert(`Failed to start ComfyUI: ${result.error}`);
+      setButton('Start ComfyUI', false);
+      return false;
+    }
+
+    setButton('Waiting for ComfyUI...', true);
+
+    // Mark that ComfyUI is starting and enable auto-retry without error messages
+    isComfyUIStarting = true;
+    comfyUIStartRetryCount = 0;
+    beginComfyStartupProgress();
+
+    // Wait a bit longer for ComfyUI to fully start (5 seconds)
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    // Start auto-retry process
+    if (isComfyUIStarting && !isConnecting) {
+      connectToComfyUI();
+    }
+    return true;
+  } catch (error) {
+    resetModalStatus();
+    alert(`Error starting ComfyUI: ${error.message}`);
+    setButton('Start ComfyUI', false);
+    return false;
   }
 }
 
